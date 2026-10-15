@@ -23,7 +23,7 @@ Then `hive init` writes `${XDG_CONFIG_HOME:-~/.config}/hive/config.toml` from th
 
 ## Config
 
-`${XDG_CONFIG_HOME:-~/.config}/hive/config.toml`. Unknown keys are errors. See `config.example.toml`.
+`${XDG_CONFIG_HOME:-~/.config}/hive/config.toml`. Unknown keys are errors. `hive init` writes a commented template from `hive/config.example.toml`.
 
 | Key | Meaning |
 | --- | --- |
@@ -66,7 +66,7 @@ Under the service, the tmux server starts with the bare systemd user environment
 
 ## tmux socket
 
-hive uses its own tmux server (`tmux -L hive`). Plain `tmux ls` and `tmux attach -t swarm-agents` use the default socket and do not see it. Use `hive attach` or `tmux -L hive attach -t swarm-agents`. Your `~/.config/tmux/tmux.conf` still applies.
+hive uses its own tmux server (`tmux -L hive`). Plain `tmux ls` and `tmux attach -t myhost-agents` use the default socket and do not see it. Use `hive attach` or `tmux -L hive attach -t myhost-agents`. Your `~/.config/tmux/tmux.conf` still applies.
 
 The reason: `hive down` and `systemctl --user stop hive` must never touch other tmux sessions.
 
@@ -78,7 +78,7 @@ The reason: `hive down` and `systemctl --user stop hive` must never touch other 
 [Unit]
 Description=hive: agent sessions in tmux
 Wants=network-online.target
-After=network-online.target ssh-agent.service obsidian-sync.service
+After=network-online.target ssh-agent.service
 
 [Service]
 Type=oneshot

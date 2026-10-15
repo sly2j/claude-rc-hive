@@ -1,21 +1,29 @@
-prefix = "swarm"                 # default: hostname
-session = "swarm-agents"         # default: "<prefix>-agents"
+# hive config: ${XDG_CONFIG_HOME:-~/.config}/hive/config.toml
+# Unknown keys are errors.
+
+# prefix = "myhost"              # default: hostname
+# session = "myhost-agents"      # default: "<prefix>-agents"
 # tmux_socket = "hive"           # tmux -L name; default "hive"
-# login_shell = true             # panes run "<shell> -l" so the login profile applies
-# shell = "/usr/bin/zsh"         # default: login shell from passwd, else $SHELL, else /bin/sh
+# login_shell = true             # default true: panes run "<shell> -l" so the login profile applies
+# shell = "/bin/bash"            # default: login shell from passwd, else $SHELL, else /bin/sh
 
 [defaults]
-# {name} = "<prefix>-<type>-<i>", {type}, {index}, {dir}, {prefix} are substituted
+# Placeholders: {name} = "<prefix>-<type>-<index>", {type}, {index}, {dir}, {prefix}
 command = "claude -n {name} --remote-control {name} --permission-mode acceptEdits"
 
 [env]                            # optional, exported in every pane before the command
 # SSH_AUTH_SOCK = "$XDG_RUNTIME_DIR/ssh-agent.socket"
 
 [service]                        # optional, extra units for After= in hive.service
-after = ["ssh-agent.service", "obsidian-sync.service"]
+# after = ["ssh-agent.service"]
+
+[[agents]]                       # one tmux window per type, one pane per instance
+type = "notes"                   # required, unique; window "<prefix>-<type>"
+dir = "~/notes"                  # must exist
+count = 2                        # panes; default 1
 
 [[agents]]
-type = "obsidian"
-dir = "~/Obsidian/Main"
-count = 4
-# command = "..."               # optional per-type override of defaults.command
+type = "project"
+dir = "~/work/my-project"
+count = 1
+# command = "claude -n {name} --remote-control {name}"   # optional per-type override of defaults.command
