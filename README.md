@@ -34,7 +34,7 @@ Then `hive init` writes `${XDG_CONFIG_HOME:-~/.config}/hive/config.toml` from th
 | `[env]` | Optional `KEY = "value"` strings, exported in every pane before the command. Values go inside double quotes in the pane shell: `$VAR` expands there, `\`, `"` and backticks are escaped. They are also set on the hive tmux server (`set-environment -g`, `$VAR` expanded by hive), so panes opened later inherit them. For anything your login profile does not set. |
 | `[service] after` | Optional list of units added to `After=` in `hive.service`. |
 | `[[agents]] type` | Required, unique. Window name is `<prefix>-<type>`. |
-| `[[agents]] dir` | Required, `~` expanded, must exist (checked by `up`). Each pane starts with `cd <dir>`. |
+| `[[agents]] dir` | Required, `~` expanded, must exist (checked by `up` and `restart`). Each pane starts with `cd <dir>`. |
 | `[[agents]] count` | Number of panes, integer >= 1. Default: 1. |
 | `[[agents]] command` | Optional override of `defaults.command`. One of the two is required. |
 
@@ -60,7 +60,7 @@ Run `hive up` from a plain shell, not from inside a Claude Code session: the tmu
 
 ## Pane environment
 
-Under the service, the tmux server starts with the bare systemd user environment, and a tmux pane can run a non-login shell (for example when tmux.conf sets `default-command`), which skips your profile (for example `~/.config/zsh/.zprofile`, where `SSH_AUTH_SOCK` for a systemd user ssh-agent is typically exported). That is why panes are login shells by default (`login_shell = true`): they get the same environment as an SSH login, without hive knowing about ssh or anything else. Use `[env]` only for variables your profile does not set. Pairing the unit with `[service] after = ["ssh-agent.service"]` makes sure the agent socket exists before the panes start.
+Under the service, the tmux server starts with the bare systemd user environment, and a tmux pane can run a non-login shell (for example when tmux.conf sets `default-command`), which skips your profile (such as `~/.config/zsh/.zprofile`, where `SSH_AUTH_SOCK` for a systemd user ssh-agent is typically exported). That is why panes are login shells by default (`login_shell = true`): they get the same environment as an SSH login, without hive knowing about ssh or anything else. Use `[env]` only for variables your profile does not set. Pairing the unit with `[service] after = ["ssh-agent.service"]` makes sure the agent socket exists before the panes start.
 
 ## tmux socket
 
@@ -93,7 +93,7 @@ KillMode=control-group
 WantedBy=default.target
 ```
 
-`hive up` forks the tmux server, which stays in the unit's cgroup while the unit is active. Once the service is installed, restart with `systemctl --user restart hive` (what `hive restart` does): a plain `hive down && hive up` would start a new tmux server outside the unit's cgroup: `systemctl --user status hive` would not show it, and the cgroup kill would no longer back up `ExecStop`. `KillMode=control-group` is the default, kept explicit. tmux built with systemd support (Debian's 3.5a is) moves each pane's processes into its own `tmux-spawn-*.scope` unit, so `systemctl --user status hive` lists only the tmux server and the cgroup kill does not reach the agents; they end when `ExecStop` (`hive down`) kills the session and the panes get SIGHUP. `hive down` alone leaves the unit "active" (`RemainAfterExit`).
+`hive up` forks the tmux server, which stays in the unit's cgroup while the unit is active. Once the service is installed, restart with `systemctl --user restart hive` (what `hive restart` does): a plain `hive down && hive up` would start a new tmux server outside the unit's cgroup, so `systemctl --user status hive` would not show it, and the cgroup kill would no longer back up `ExecStop`. `KillMode=control-group` is the default, kept explicit. tmux built with systemd support (Debian's 3.5a is) moves each pane's processes into its own `tmux-spawn-*.scope` unit, so `systemctl --user status hive` lists only the tmux server and the cgroup kill does not reach the agents; they end when `ExecStop` (`hive down`) kills the session and the panes get SIGHUP. `hive down` alone leaves the unit "active" (`RemainAfterExit`).
 
 Logs: `journalctl --user -u hive`, or `journalctl --user-unit hive` where journald keeps no per-user files (`Storage=volatile`).
 
