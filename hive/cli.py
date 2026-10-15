@@ -403,7 +403,7 @@ def main():
         return cmd_install_service(args)
     if args.command == "uninstall-service":
         return cmd_uninstall_service(args)
-    cfg = load_config(check_dirs=args.command == "up")
+    cfg = load_config(check_dirs=args.command in ("up", "restart"))
     handlers = {"up": cmd_up, "down": cmd_down, "restart": cmd_restart,
                 "status": cmd_status, "attach": cmd_attach}
     return handlers[args.command](cfg, args)

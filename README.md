@@ -11,7 +11,7 @@ uv tool install .            # from a checkout of this repo
 
 Debian 13 follows PEP 668, so `pip install --user` is blocked; use uv or pipx.
 
-Update after pulling or changing the repo (all three were verified to pick up a new `VERSION` and changed sources):
+Update after pulling or changing the repo (both were verified to pick up a new `VERSION` and changed sources):
 
 ```sh
 uv tool upgrade hive         # or: uv tool install --reinstall .
@@ -60,13 +60,13 @@ Run `hive up` from a plain shell, not from inside a Claude Code session: the tmu
 
 ## Pane environment
 
-Under the service, the tmux server starts with the bare systemd user environment, and a plain tmux pane runs a non-login shell, which skips your profile (for example `~/.config/zsh/.zprofile`, where `SSH_AUTH_SOCK` for a systemd user ssh-agent is typically exported). That is why panes are login shells by default (`login_shell = true`): they get the same environment as an SSH login, without hive knowing about ssh or anything else. Use `[env]` only for variables your profile does not set. Pairing the unit with `[service] after = ["ssh-agent.service"]` makes sure the agent socket exists before the panes start.
+Under the service, the tmux server starts with the bare systemd user environment, and a tmux pane can run a non-login shell (for example when tmux.conf sets `default-command`), which skips your profile (for example `~/.config/zsh/.zprofile`, where `SSH_AUTH_SOCK` for a systemd user ssh-agent is typically exported). That is why panes are login shells by default (`login_shell = true`): they get the same environment as an SSH login, without hive knowing about ssh or anything else. Use `[env]` only for variables your profile does not set. Pairing the unit with `[service] after = ["ssh-agent.service"]` makes sure the agent socket exists before the panes start.
 
 ## tmux socket
 
 hive uses its own tmux server (`tmux -L hive`). Plain `tmux ls` and `tmux attach -t swarm-agents` use the default socket and do not see it. Use `hive attach` or `tmux -L hive attach -t swarm-agents`. Your `~/.config/tmux/tmux.conf` still applies.
 
-The reason: `hive down` and `systemctl --user stop hive` must never touch other tmux sessions, and the whole server lives in the service cgroup.
+The reason: `hive down` and `systemctl --user stop hive` must never touch other tmux sessions.
 
 ## systemd service
 
@@ -93,9 +93,9 @@ KillMode=control-group
 WantedBy=default.target
 ```
 
-`hive up` forks the tmux server, which stays in the unit's cgroup while the unit is active. Once the service is installed, restart with `systemctl --user restart hive` (what `hive restart` does): a plain `hive down && hive up` would start a new tmux server outside the cgroup, which `systemctl stop` then no longer cleans up. `KillMode=control-group` is the default, kept explicit. tmux built with systemd support (Debian's 3.5a is) moves each pane's processes into its own `tmux-spawn-*.scope` unit, so `systemctl --user status hive` lists only the tmux server and the cgroup kill does not reach the agents; they end when `ExecStop` (`hive down`) kills the session and the panes get SIGHUP. `hive down` alone leaves the unit "active" (`RemainAfterExit`).
+`hive up` forks the tmux server, which stays in the unit's cgroup while the unit is active. Once the service is installed, restart with `systemctl --user restart hive` (what `hive restart` does): a plain `hive down && hive up` would start a new tmux server outside the unit's cgroup: `systemctl --user status hive` would not show it, and the cgroup kill would no longer back up `ExecStop`. `KillMode=control-group` is the default, kept explicit. tmux built with systemd support (Debian's 3.5a is) moves each pane's processes into its own `tmux-spawn-*.scope` unit, so `systemctl --user status hive` lists only the tmux server and the cgroup kill does not reach the agents; they end when `ExecStop` (`hive down`) kills the session and the panes get SIGHUP. `hive down` alone leaves the unit "active" (`RemainAfterExit`).
 
-Logs: `journalctl --user -u hive`. Where the journal keeps no per-user files (journald `Storage=volatile`, as set on Raspberry Pi OS), that prints "No journal files were found"; use `journalctl --user-unit hive` instead (needs the `adm` group or root).
+Logs: `journalctl --user -u hive`, or `journalctl --user-unit hive` where journald keeps no per-user files (`Storage=volatile`).
 
 ## Versioning
 
@@ -105,7 +105,7 @@ The version is in `VERSION`, scheme `1.x`. A pre-commit hook bumps it on every c
 git config core.hooksPath .githooks
 ```
 
-The hook computes the new version from `HEAD:VERSION`, so re-running after an aborted commit does not bump twice. Feature branches: rebase on `main`, then squash-merge as one commit, so `main` stays linear and gets exactly one increment.
+The hook computes the new version from `HEAD:VERSION`, so re-running after an aborted commit does not bump twice. Feature branches: rebase on `main`, then squash-merge as one commit, so `main` stays linear and gets exactly one increment. `git commit --amend` on `main` bumps again; amend with `--no-verify`.
 
 ## License
 
