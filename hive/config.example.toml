@@ -1,0 +1,21 @@
+prefix = "swarm"                 # default: hostname
+session = "swarm-agents"         # default: "<prefix>-agents"
+# tmux_socket = "hive"           # tmux -L name; default "hive"
+# login_shell = true             # panes run "<shell> -l" so the login profile applies
+# shell = "/usr/bin/zsh"         # default: login shell from passwd, else $SHELL, else /bin/sh
+
+[defaults]
+# {name} = "<prefix>-<type>-<i>", {type}, {index}, {dir}, {prefix} are substituted
+command = "claude -n {name} --remote-control {name} --permission-mode acceptEdits"
+
+[env]                            # optional, exported in every pane before the command
+# SSH_AUTH_SOCK = "$XDG_RUNTIME_DIR/ssh-agent.socket"
+
+[service]                        # optional, extra units for After= in hive.service
+after = ["ssh-agent.service", "obsidian-sync.service"]
+
+[[agents]]
+type = "obsidian"
+dir = "~/Obsidian/Main"
+count = 4
+# command = "..."               # optional per-type override of defaults.command

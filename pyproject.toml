@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hive"
+dynamic = ["version"]
+description = "Run N instances of each agent kind in tmux panes"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = []
+
+[project.scripts]
+hive = "hive.cli:main"
+
+[tool.setuptools]
+packages = ["hive"]
+
+[tool.setuptools.package-data]
+hive = ["config.example.toml"]
+
+[tool.setuptools.dynamic]
+version = {file = "VERSION"}
