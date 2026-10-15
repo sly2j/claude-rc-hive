@@ -2,6 +2,8 @@
 
 Run N instances of each agent kind in tmux. A window is an agent kind, each pane is one instance. An agent kind is just a directory plus a command; hive knows nothing about what the command does.
 
+The repository is `claude-rc-hive`; the program, Python package, config directory and systemd unit are all named `hive`.
+
 ## Install
 
 ```sh

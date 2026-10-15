@@ -12,6 +12,9 @@ license = "MIT"
 license-files = ["LICENSE"]
 dependencies = []
 
+[project.urls]
+Repository = "https://github.com/sly2j/claude-rc-hive"
+
 [project.scripts]
 hive = "hive.cli:main"
 
