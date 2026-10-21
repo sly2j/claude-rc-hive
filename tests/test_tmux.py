@@ -105,6 +105,7 @@ def test_lifecycle(hive, tmp_path):
     claude_md = qdir / "CLAUDE.md"
     assert claude_md.read_text().startswith("<!-- managed by hive;")
     assert (qdir / ".claude" / "settings.json").is_file()
+    assert (qdir / ".claude" / "hooks" / "guard.py").is_file()
     local = qdir / "CLAUDE.local.md"
     local.write_text("mine\n")
 

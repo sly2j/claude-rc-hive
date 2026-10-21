@@ -21,6 +21,7 @@ from pathlib import Path
 
 from hive.configedit import (ENV_KEY_RE, EditError, append_agent, set_count, verify,
                              write_atomic)
+from hive.inspect import DEFAULT_ROOTS, inspect_launcher
 from hive.reconcile import (Existing, ResolveError, RunningPane, desired_panes,
                             parse_records, plan, resolve_target, sandbox_type)
 from hive.trust import (TrustError, is_trusted, looks_like_trust_prompt, seed_trust,
@@ -29,7 +30,8 @@ from hive.trust import (TrustError, is_trusted, looks_like_trust_prompt, seed_tr
 UNIT_NAME = "hive.service"
 
 TOP_KEYS = {"prefix", "session", "tmux_socket", "login_shell", "shell",
-            "defaults", "env", "service", "agents", "search_roots", "queen"}
+            "defaults", "env", "service", "agents", "search_roots", "queen",
+            "inspect_roots"}
 AGENT_KEYS = {"type", "dir", "count", "command", "env", "config_dir"}
 QUEEN_KEYS = {"command", "discover", "env", "config_dir"}
 # Used when neither [queen] nor [defaults] sets a command, so 1.5 configs keep loading.
@@ -154,6 +156,14 @@ def load_config(check_dirs=False):
         die(f"{path}: search_roots must be a list of strings")
     search_roots = [str(Path(r).expanduser()) for r in search_roots]
 
+    inspect_roots = raw.get("inspect_roots", DEFAULT_ROOTS)
+    if not isinstance(inspect_roots, list) or not all(isinstance(r, str) for r in inspect_roots):
+        die(f"{path}: inspect_roots must be a list of strings")
+    inspect_roots = [str(Path(r).expanduser()) for r in inspect_roots]
+    for r in inspect_roots:
+        if not Path(r).is_absolute():
+            die(f"{path}: inspect_roots entry '{r}' must be an absolute path or start with ~")
+
     queen = raw.get("queen", {})
     check_type(queen, dict, "queen", path)
     check_keys(queen, QUEEN_KEYS, "[queen]", path)
@@ -219,6 +229,7 @@ def load_config(check_dirs=False):
         "after": after,
         "agents": agents,
         "search_roots": search_roots,
+        "inspect_roots": inspect_roots,
         "queen": {"type": "queen", "dir": str(config_home() / "hive" / "queen"),
                   "command": queen_command, "env": queen_env, "config_dir": queen_config_dir},
         "discover": discover,
@@ -363,11 +374,12 @@ def warn_untrusted(cfg, pane):
 def materialize_queen(cfg):
     """Write the packaged queen instructions into the queen dir when missing or different."""
     qdir = Path(cfg["queen"]["dir"])
-    (qdir / ".claude").mkdir(parents=True, exist_ok=True)
+    (qdir / ".claude" / "hooks").mkdir(parents=True, exist_ok=True)
     pkg = resources.files("hive").joinpath("queen")
     files = {
         qdir / "CLAUDE.md": QUEEN_HEADER.encode() + pkg.joinpath("CLAUDE.md").read_bytes(),
         qdir / ".claude" / "settings.json": pkg.joinpath("settings.json").read_bytes(),
+        qdir / ".claude" / "hooks" / "guard.py": pkg.joinpath("hooks", "guard.py").read_bytes(),
     }
     for path, data in files.items():
         if not path.exists() or path.read_bytes() != data:
@@ -694,6 +706,10 @@ def cmd_reconcile(cfg, args):
     return reconcile(cfg, dry_run=args.dry_run)
 
 
+def cmd_inspect_launcher(cfg, args):
+    return inspect_launcher(args.launch_command, cfg["inspect_roots"], sys.stdout, sys.stderr)
+
+
 def cmd_discover(cfg, args):
     if not cfg["discover"]:
         die("no discover command configured; set [queen] discover", 2)
@@ -800,6 +816,9 @@ def build_parser():
     p = sub.add_parser("reconcile", help="make the running session match the config")
     p.add_argument("--dry-run", action="store_true", help="only print what would change")
     sub.add_parser("discover", help="run [queen] discover and print its output")
+    p = sub.add_parser("inspect-launcher",
+                       help="read-only: show a launcher's CLAUDE_CONFIG_DIR evidence (files under inspect_roots only)")
+    p.add_argument("launch_command", metavar="COMMAND", help="the full launch command, as one argument")
     sub.add_parser("init", help="write an example config if none exists")
     p = sub.add_parser("install-service", help="write the systemd user unit")
     p.add_argument("--enable", action="store_true", help="also enable and start it now")
@@ -823,7 +842,7 @@ def main():
     handlers = {"up": cmd_up, "down": cmd_down, "restart": cmd_restart,
                 "status": cmd_status, "attach": cmd_attach, "list": cmd_list,
                 "spawn": cmd_spawn, "stop": cmd_stop, "reconcile": cmd_reconcile,
-                "discover": cmd_discover}
+                "discover": cmd_discover, "inspect-launcher": cmd_inspect_launcher}
     return handlers[args.command](cfg, args)
 
 

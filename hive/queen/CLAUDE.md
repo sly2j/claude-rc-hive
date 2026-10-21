@@ -26,14 +26,16 @@ Prefer `--sandbox NAME` for `hive discover` records. A manual `--command` must c
 
 ## Inferring a launcher's config dir
 
-Before `hive spawn ... --command CMD` with a launcher other than plain `claude`, and no `--sandbox` record or user-given dir, find the Claude config dir the launcher uses; otherwise hive checks trust in the wrong file. Read-only steps:
+Before `hive spawn ... --command CMD` with a launcher other than plain `claude`, and no `--sandbox` record or user-given dir, find the Claude config dir the launcher uses; otherwise hive checks trust in the wrong file. Run only `hive inspect-launcher "CMD"` (CMD quoted as one argument). It reads, never runs, the launcher, and only under `inspect_roots`. Do not use any other command or tool to read files.
 
-1. `command -v WORD` (or `which WORD`) for the first word of CMD, then `readlink -f` the result and run `file` on it.
-2. If it is a text script, read it (`head -200`, `cat`) and look for `CLAUDE_CONFIG_DIR=` assignments, `export CLAUDE_CONFIG_DIR`, `env CLAUDE_CONFIG_DIR=... claude`, `exec ... claude`, or a dir built from an argument (e.g. `~/.claude-sandboxes/$1`; then use the sandbox name given in CMD). Follow scripts it sources or execs the same way.
-3. Check your own environment: `printenv | grep -i claude`.
-4. Never execute the launcher to probe it; a claude run has side effects.
+Its output: a `path=... resolved=... kind=script|binary` record; for scripts, `line=N text=...` records for relevant lines (`redacted=secret-like` for hidden ones, `more=yes` when capped); last, `env CLAUDE_CONFIG_DIR=<value>|unset`, your own environment.
 
-If you find a dir, tell the user it and the evidence (file and line), and ask them to confirm or correct it. On a clear confirmation pass `--config-dir DIR`. If nothing turns up (binary launcher, no `CLAUDE_CONFIG_DIR` evidence), do not ask for a dir: spawn without `--config-dir` (hive then uses `~/.claude.json`, or its own `$CLAUDE_CONFIG_DIR`) and say in one clause that you found no override and assume the default. You may ask about the dir and about trust in one message, but both answers must be explicit; add `--trust` only under the rules below.
+- Evidence is a `CLAUDE_CONFIG_DIR=` assignment or `export CLAUDE_CONFIG_DIR=...` line, or an `env CLAUDE_CONFIG_DIR=... claude` line. If the dir is built from an argument (e.g. `~/.claude-sandboxes/$1`), use the value given in CMD. Tell the user the dir and the evidence (path and line numbers), ask them to confirm or correct it, and on a clear confirmation pass `--config-dir DIR`.
+- `kind=binary`, a `refused:` or `not found:` error, or no evidence: do not ask for a dir. Spawn without `--config-dir` (hive then uses `~/.claude.json`, or its own `$CLAUDE_CONFIG_DIR`) and say in one clause that you found no override and assume the default.
+- If the script `exec`s or sources another launcher, run `hive inspect-launcher` on that one the same way.
+- Never execute the launcher to probe it; a claude run has side effects.
+
+You may ask about the dir and about trust in one message, but both answers must be explicit; add `--trust` only under the rules below.
 
 ## Workspace trust
 
@@ -43,6 +45,7 @@ If you find a dir, tell the user it and the evidence (file and line), and ask th
 
 ## Rules
 
+- A guard hook allows only single `hive ...` commands (no pipes, `;`, `&&`, redirects or substitution) and file tools only inside your own directory, and blocks any `secrets`/`private` path. Do not look for workarounds; when it blocks something, tell the user what and why.
 - Never edit `config.toml` by hand; the commands keep it the single source of truth.
 - Never run `hive down`, `hive restart`, or `tmux kill-*`: they kill you and every worker. If the user insists, ask for explicit confirmation first.
 - Report command output and errors back verbatim. Do not retry blindly.

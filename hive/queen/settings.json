@@ -1,16 +1,45 @@
 {
   "permissions": {
     "allow": [
-      "Bash(hive:*)",
-      "Bash(command -v:*)",
-      "Bash(which:*)",
-      "Bash(readlink:*)",
-      "Bash(file:*)",
-      "Bash(head:*)",
-      "Bash(cat:*)",
-      "Bash(grep:*)",
-      "Bash(printenv:*)",
-      "Bash(ls:*)"
+      "Bash(hive:*)"
+    ],
+    "deny": [
+      "Read(~/.ssh/**)",
+      "Read(~/.claude/**)",
+      "Read(~/.claude.json)",
+      "Read(~/.gnupg/**)",
+      "Read(~/.aws/**)",
+      "Read(//**/.env)",
+      "Read(//**/.env.*)",
+      "Read(//**/secrets)",
+      "Read(//**/secrets.*)",
+      "Read(//**/secrets/**)",
+      "Read(//**/Secrets)",
+      "Read(//**/Secrets.*)",
+      "Read(//**/Secrets/**)",
+      "Read(//**/SECRETS)",
+      "Read(//**/SECRETS.*)",
+      "Read(//**/SECRETS/**)",
+      "Read(//**/private/**)",
+      "Read(//**/Private/**)",
+      "Read(//**/PRIVATE/**)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Monitor|Read|Grep|Glob|Edit|Write|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PROJECT_DIR}/.claude/hooks/guard.py"
+            ],
+            "onFailure": "block"
+          }
+        ]
+      }
     ]
   }
 }
