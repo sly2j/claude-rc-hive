@@ -13,6 +13,7 @@ import tomllib
 HEADER_RE = re.compile(r"^\s*\[\[\s*agents\s*\]\]\s*(#.*)?$")
 COUNT_RE = re.compile(r"^(\s*count\s*=\s*)\d+")
 KEY_RE = re.compile(r"^\s*[A-Za-z0-9_\"'-]+\s*=")
+ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 INLINE_MSG = "config uses an inline agents array; hive can only edit [[agents]] tables"
 
@@ -72,11 +73,20 @@ def set_count(text, type_, n):
     raise EditError(f"no [[agents]] block with type '{type_}'")
 
 
-def append_agent(text, type_, dir_, count, command=None):
+def append_agent(text, type_, dir_, count, command=None, env=None, config_dir=None):
     check_inline(text.splitlines(keepends=True))
     block = f"[[agents]]\ntype = {toml_string(type_)}\ndir = {toml_string(dir_)}\ncount = {count}\n"
     if command is not None:
         block += f"command = {toml_string(command)}\n"
+    if config_dir is not None:
+        block += f"config_dir = {toml_string(config_dir)}\n"
+    if env:
+        # An inline table keeps the block free of [headers] for agent_blocks.
+        for key in env:
+            if not ENV_KEY_RE.fullmatch(key):
+                raise EditError(f"env key {key!r} must match {ENV_KEY_RE.pattern}")
+        pairs = ", ".join(f"{k} = {toml_string(v)}" for k, v in env.items())
+        block += f"env = {{ {pairs} }}\n"
     head = text.rstrip("\n")
     return head + "\n\n" + block if head.strip() else block
 

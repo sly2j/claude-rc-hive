@@ -1,7 +1,16 @@
 {
   "permissions": {
     "allow": [
-      "Bash(hive:*)"
+      "Bash(hive:*)",
+      "Bash(command -v:*)",
+      "Bash(which:*)",
+      "Bash(readlink:*)",
+      "Bash(file:*)",
+      "Bash(head:*)",
+      "Bash(cat:*)",
+      "Bash(grep:*)",
+      "Bash(printenv:*)",
+      "Bash(ls:*)"
     ]
   }
 }

@@ -19,16 +19,19 @@ from importlib import resources
 from importlib.metadata import PackageNotFoundError, version as pkg_version
 from pathlib import Path
 
-from hive.configedit import EditError, append_agent, set_count, verify, write_atomic
+from hive.configedit import (ENV_KEY_RE, EditError, append_agent, set_count, verify,
+                             write_atomic)
 from hive.reconcile import (Existing, ResolveError, RunningPane, desired_panes,
-                            plan, resolve_target)
+                            parse_records, plan, resolve_target, sandbox_type)
+from hive.trust import (TrustError, is_trusted, looks_like_trust_prompt, seed_trust,
+                        trust_file, trust_root)
 
 UNIT_NAME = "hive.service"
 
 TOP_KEYS = {"prefix", "session", "tmux_socket", "login_shell", "shell",
             "defaults", "env", "service", "agents", "search_roots", "queen"}
-AGENT_KEYS = {"type", "dir", "count", "command"}
-QUEEN_KEYS = {"command", "discover"}
+AGENT_KEYS = {"type", "dir", "count", "command", "env", "config_dir"}
+QUEEN_KEYS = {"command", "discover", "env", "config_dir"}
 # Used when neither [queen] nor [defaults] sets a command, so 1.5 configs keep loading.
 DEFAULT_QUEEN_COMMAND = "claude -n {name} --remote-control {name} --permission-mode auto"
 QUEEN_HEADER = "<!-- managed by hive; do not edit, put additions in CLAUDE.local.md -->\n"
@@ -82,6 +85,28 @@ def check_type(value, expected, key, path):
         die(f"{path}: '{key}' must be {expected.__name__}")
 
 
+CONFIG_DIR_ENV_MSG = ("hive never sets CLAUDE_CONFIG_DIR (the launched command does); "
+                      "use config_dir to name the dir for the trust check")
+
+
+def check_env(env, where, path):
+    check_type(env, dict, where, path)
+    for key, value in env.items():
+        if not isinstance(value, str):
+            die(f"{path}: {where}.{key} must be a string")
+        if key == "CLAUDE_CONFIG_DIR":
+            die(f"{path}: {where}.CLAUDE_CONFIG_DIR: {CONFIG_DIR_ENV_MSG}")
+
+
+def check_config_dir(table, where, path):
+    """Optional config_dir: ~ expanded, absolute. Only locates the trust file."""
+    value = table.get("config_dir")
+    if value is None:
+        return None
+    check_type(value, str, f"{where}.config_dir", path)
+    return expand_config_dir(value, f"{path}: {where}.config_dir")
+
+
 def load_config(check_dirs=False):
     path = config_path()
     if not path.exists():
@@ -115,10 +140,7 @@ def load_config(check_dirs=False):
         check_type(default_command, str, "defaults.command", path)
 
     env = raw.get("env", {})
-    check_type(env, dict, "env", path)
-    for key, value in env.items():
-        if not isinstance(value, str):
-            die(f"{path}: env.{key} must be a string")
+    check_env(env, "env", path)
 
     service = raw.get("service", {})
     check_type(service, dict, "service", path)
@@ -140,6 +162,9 @@ def load_config(check_dirs=False):
     discover = queen.get("discover")
     if discover is not None:
         check_type(discover, str, "queen.discover", path)
+    queen_env = queen.get("env", {})
+    check_env(queen_env, "queen.env", path)
+    queen_config_dir = check_config_dir(queen, "queen", path)
 
     raw_agents = raw.get("agents", [])
     check_type(raw_agents, list, "agents", path)
@@ -178,7 +203,11 @@ def load_config(check_dirs=False):
             die(f"{path}: {where} has no 'command' and [defaults] has no 'command'")
         check_type(command, str, f"{where}.command", path)
 
-        agents.append({"type": kind, "dir": str(directory), "count": count, "command": command})
+        agent_env = entry.get("env", {})
+        check_env(agent_env, f"{where}.env", path)
+
+        agents.append({"type": kind, "dir": str(directory), "count": count, "command": command,
+                       "env": agent_env, "config_dir": check_config_dir(entry, where, path)})
 
     return {
         "prefix": prefix,
@@ -191,7 +220,7 @@ def load_config(check_dirs=False):
         "agents": agents,
         "search_roots": search_roots,
         "queen": {"type": "queen", "dir": str(config_home() / "hive" / "queen"),
-                  "command": queen_command},
+                  "command": queen_command, "env": queen_env, "config_dir": queen_config_dir},
         "discover": discover,
         "config_path": str(path),
     }
@@ -229,10 +258,10 @@ def session_running(cfg):
     return tmux(cfg, "has-session", "-t", "=" + cfg["session"], check=False).returncode == 0
 
 
-def shell_line(cfg, directory, command):
-    """One shell line: env exports, cd, command."""
+def shell_line(cfg, directory, command, env=None):
+    """One shell line: [env] exports, then the type's env exports, cd, command."""
     parts = []
-    for key, value in cfg["env"].items():
+    for key, value in [*cfg["env"].items(), *(env or {}).items()]:
         # Escape what is special inside double quotes; leave $ so variables expand.
         escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("`", "\\`")
         parts.append(f'export {key}="{escaped}"')
@@ -295,7 +324,8 @@ def setup_pane(cfg, pane, pane_id):
     # Keep apps from overwriting the title; ignore tmux versions without the option.
     tmux(cfg, "set-option", "-p", "-t", pane_id, "allow-set-title", "off", check=False)
     tmux(cfg, "set-option", "-p", "-t", pane_id, "@hive_name", pane.name)
-    tmux(cfg, "send-keys", "-t", pane_id, "-l", shell_line(cfg, pane.dir, expand_pane(cfg, pane)))
+    tmux(cfg, "send-keys", "-t", pane_id, "-l",
+         shell_line(cfg, pane.dir, expand_pane(cfg, pane), pane.env))
     tmux(cfg, "send-keys", "-t", pane_id, "Enter")
 
 
@@ -315,6 +345,19 @@ def start_pane(cfg, pane, window_id):
         tmux(cfg, "select-layout", "-t", pane_id, "tiled")
     setup_pane(cfg, pane, pane_id)
     return pane_id
+
+
+def trust_state(directory, config_dir):
+    """(trust root, trust file, trusted?) for a pane in `directory`."""
+    root = trust_root(directory)
+    return root, trust_file(config_dir), is_trusted(root, config_dir)
+
+
+def warn_untrusted(cfg, pane):
+    """Warn only: hive never records trust without an explicit --trust."""
+    root, _, trusted = trust_state(pane.dir, pane.config_dir)
+    if not trusted:
+        print(f"untrusted {pane.name} {root}", file=sys.stderr)
 
 
 def materialize_queen(cfg):
@@ -355,6 +398,7 @@ def reconcile(cfg, dry_run=False, announce_idle=True):
     windows = None
     for pane in to_start:
         acted = True
+        warn_untrusted(cfg, pane)
         if dry_run:
             print(f"would start {pane.name}")
             continue
@@ -385,6 +429,7 @@ def cmd_up(cfg, args):
 
     session = cfg["session"]
     first = desired_panes(cfg)[0]  # the queen
+    warn_untrusted(cfg, first)
     try:
         materialize_queen(cfg)
         shell = [cfg["pane_shell"]] if cfg["pane_shell"] else []
@@ -457,6 +502,11 @@ def quote(text):
     return json.dumps(text, ensure_ascii=False)
 
 
+def trust_fields(cfg, entry):
+    _, path, trusted = trust_state(entry["dir"], entry["config_dir"])
+    return f"trusted={'yes' if trusted else 'no'} trust_file={path}"
+
+
 def cmd_list(cfg, args):
     queen_name = f"{cfg['prefix']}-queen"
     up = session_running(cfg)
@@ -464,11 +514,15 @@ def cmd_list(cfg, args):
     print(f"session={cfg['session']} socket={cfg['socket']} running={'yes' if up else 'no'} "
           f"config={cfg['config_path']}")
     print(f"queen name={queen_name} running={'yes' if queen_name in running else 'no'} "
-          f"dir={cfg['queen']['dir']}")
+          f"dir={cfg['queen']['dir']} {trust_fields(cfg, cfg['queen'])}")
     for agent in cfg["agents"]:
         n = sum(1 for r in running.values() if r.type == agent["type"])
         print(f"agent type={agent['type']} dir={agent['dir']} count={agent['count']} "
-              f"running={n} command={quote(agent['command'])}")
+              f"running={n} command={quote(agent['command'])} {trust_fields(cfg, agent)}")
+    for r in running.values():
+        screen = tmux(cfg, "capture-pane", "-p", "-t", r.pane_id, check=False).stdout
+        waiting = " waiting=trust" if looks_like_trust_prompt(screen) else ""
+        print(f"pane name={r.name} type={r.type} id={r.pane_id}{waiting}")
     for u in unmanaged:
         print(f"unmanaged pane={u['pane']} window={u['window']} title={quote(u['title'])}")
     if up:
@@ -515,17 +569,92 @@ def resolve_or_die(cfg, target, type_override=None):
         die(str(e), 2)
 
 
+def parse_env_args(items):
+    env = {}
+    for item in items or []:
+        key, sep, value = item.partition("=")
+        if not sep or not ENV_KEY_RE.fullmatch(key):
+            die(f"--env '{item}' must be KEY=VALUE with KEY matching {ENV_KEY_RE.pattern}")
+        if key == "CLAUDE_CONFIG_DIR":
+            die(f"--env CLAUDE_CONFIG_DIR: {CONFIG_DIR_ENV_MSG} (--config-dir or --sandbox)")
+        env[key] = value
+    return env
+
+
+def expand_config_dir(text, where):
+    directory = Path(text).expanduser()
+    if not directory.is_absolute():
+        die(f"{where} '{text}' must be absolute or start with ~")
+    return str(directory)
+
+
+def sandbox_record(cfg, name):
+    """The `[queen] discover` record with name == `name`."""
+    if not cfg["discover"]:
+        die("--sandbox needs [queen] discover, which is not configured")
+    out = subprocess.run(cfg["discover"], shell=True, capture_output=True, text=True)
+    if out.returncode != 0:
+        die(f"discover command failed (exit {out.returncode}): {out.stderr.strip()}", 1)
+    try:
+        records = parse_records(out.stdout)
+    except ResolveError as e:
+        die(str(e))
+    for record in records:
+        if record["name"] == name:
+            return record
+    die(f"no sandbox '{name}' in discover output; available: "
+        f"{', '.join(r['name'] for r in records) or 'none'}")
+
+
+def ensure_trust(directory, config_dir, seed):
+    """Exit 3 unless the pane's trust root is trusted, or --trust records it now."""
+    root, path, trusted = trust_state(directory, config_dir)
+    if trusted:
+        return
+    if not seed:
+        print(f"untrusted: {directory} (trust root {root}, trust file {path}); "
+              "rerun with --trust after the user confirms", file=sys.stderr)
+        sys.exit(3)
+    try:
+        seed_trust(root, config_dir)
+    except (TrustError, OSError) as e:
+        die(f"cannot record trust for {root}: {e}", 1)
+    print(f"trusted {root} in {path}")
+
+
 def cmd_spawn(cfg, args):
-    command = args.agent_command
+    command, config_dir, type_name = args.agent_command, args.config_dir, args.type
+    if args.sandbox is not None:
+        if command is not None or config_dir is not None:
+            die("--sandbox takes command and config_dir from discover; "
+                "do not combine it with --command or --config-dir")
+        record = sandbox_record(cfg, args.sandbox)
+        command, config_dir = record["command"], record["config_dir"]
+        if type_name is None:
+            try:
+                type_name = sandbox_type(cfg, args.target, args.sandbox)
+            except ResolveError as e:
+                die(str(e))
     if command is not None and not ("{name}" in command and "--remote-control" in command):
         die("--command must contain {name} and --remote-control")
-    target = resolve_or_die(cfg, args.target, args.type)
+    expanded_dir = (expand_config_dir(config_dir, "config_dir") if config_dir is not None
+                    else None)
+    env = parse_env_args(args.env)
+    target = resolve_or_die(cfg, args.target, type_name)
     if isinstance(target, Existing):
         entry = target.entry
         if command is not None and command != entry["command"]:
             die(f"type '{entry['type']}' runs '{entry['command']}'; to run a different command "
                 f"in the same directory give a new type: hive spawn {entry['dir']} "
                 "--type <name> --command '...'")
+        if config_dir is not None and expanded_dir != entry["config_dir"]:
+            die(f"type '{entry['type']}' has config_dir '{entry['config_dir'] or ''}'; to use "
+                f"another one in the same directory give a new type: hive spawn {entry['dir']} "
+                "--type <name> ...")
+        if args.env is not None and env != entry["env"]:
+            die(f"type '{entry['type']}' has a different env; to use another env in the same "
+                f"directory give a new type: hive spawn {entry['dir']} --type <name> --env ...")
+        ensure_trust(entry["dir"], entry["config_dir"], args.trust)
         old, new = entry["count"], entry["count"] + args.n
         set_count_edit(cfg, entry["type"], new)
         return after_edit(cfg, entry["type"], old, new)
@@ -537,8 +666,14 @@ def cmd_spawn(cfg, args):
     new_agent = {"type": target.type, "dir": target.stored_dir, "count": args.n}
     if command is not None:
         new_agent["command"] = command
+    if config_dir is not None:
+        new_agent["config_dir"] = config_dir
+    if env:
+        new_agent["env"] = env
+    ensure_trust(target.dir, expanded_dir, args.trust)
     edit_config(cfg,
-                lambda text: append_agent(text, target.type, target.stored_dir, args.n, command),
+                lambda text: append_agent(text, target.type, target.stored_dir, args.n,
+                                          command, env, config_dir),
                 lambda doc: doc.setdefault("agents", []).append(new_agent))
     return after_edit(cfg, target.type, 0, args.n)
 
@@ -651,6 +786,14 @@ def build_parser():
     p.add_argument("-n", type=positive_int, default=1, help="number of workers to add (default 1)")
     p.add_argument("--type", help="agent type name for a new entry (default: directory name)")
     p.add_argument("--command", dest="agent_command", help="command template; must contain {name} and --remote-control")
+    p.add_argument("--config-dir", dest="config_dir", metavar="PATH",
+                   help="Claude config dir the command uses; only locates the trust file")
+    p.add_argument("--sandbox", metavar="NAME",
+                   help="take command and config_dir from the [queen] discover record NAME")
+    p.add_argument("--env", action="append", metavar="KEY=VALUE",
+                   help="env for a new type, exported after [env] (repeatable)")
+    p.add_argument("--trust", action="store_true",
+                   help="record Claude Code workspace trust for the directory (only after the user agreed)")
     p = sub.add_parser("stop", help="remove workers (lowers count, then reconciles)")
     p.add_argument("target", metavar="TARGET", help="agent type")
     p.add_argument("-n", type=positive_int, default=1, help="number of workers to remove (default 1)")

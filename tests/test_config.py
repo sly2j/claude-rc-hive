@@ -38,7 +38,8 @@ def test_1_5_config_loads_with_queen_defaults(write, tmp_path):
           f'[[agents]]\ntype = "obsidian"\ndir = "{tmp_path}"\ncount = 4\n')
     cfg = cli.load_config()
     assert cfg["queen"] == {"type": "queen", "dir": str(tmp_path / "hive" / "queen"),
-                            "command": "claude -n {name} --remote-control {name}"}
+                            "command": "claude -n {name} --remote-control {name}", "env": {},
+                            "config_dir": None}
     assert cfg["queen"]["command"] == cfg["agents"][0]["command"]
     assert cfg["search_roots"] == []
     assert cfg["discover"] is None
@@ -122,3 +123,44 @@ def test_all_zero_counts_load(write, tmp_path):
     write(BASE + f'\n[[agents]]\ntype = "a"\ndir = "{tmp_path}"\ncount = 0\n'
           f'\n[[agents]]\ntype = "b"\ndir = "{tmp_path}"\ncount = 0\n')
     assert [a["count"] for a in cli.load_config()["agents"]] == [0, 0]
+
+
+def test_per_type_env_and_config_dir(write, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    write(BASE + '\n[env]\nA = "g"\nB = "g"\n\n[queen]\nenv = { Q = "1" }\n'
+          'config_dir = "~/.claude-q"\n'
+          f'\n[[agents]]\ntype = "a"\ndir = "{tmp_path}"\nenv = {{ B = "t", C = "$HOME/x" }}\n'
+          'config_dir = "/sandbox/cc"\n')
+    cfg = cli.load_config()
+    assert cfg["queen"]["env"] == {"Q": "1"}
+    assert cfg["queen"]["config_dir"] == str(tmp_path / ".claude-q")
+    agent = cfg["agents"][0]
+    assert agent["env"] == {"B": "t", "C": "$HOME/x"}
+    assert agent["config_dir"] == "/sandbox/cc"
+    line = cli.shell_line(cfg, "/d", "run", agent["env"])
+    assert line == ('export A="g" && export B="g" && export B="t" && export C="$HOME/x"'
+                    ' && cd /d && run')
+    # config_dir only locates the trust file; it is never exported
+    assert "CLAUDE_CONFIG_DIR" not in line
+
+
+def test_per_type_env_rejects_claude_config_dir(write, capsys, tmp_path):
+    write(BASE + f'\n[[agents]]\ntype = "a"\ndir = "{tmp_path}"\n'
+          'env = { CLAUDE_CONFIG_DIR = "/x" }\n')
+    fails(capsys, "agents[1].env.CLAUDE_CONFIG_DIR: hive never sets CLAUDE_CONFIG_DIR")
+    write(BASE + '\n[queen]\nenv = { CLAUDE_CONFIG_DIR = "/x" }\n')
+    fails(capsys, "queen.env.CLAUDE_CONFIG_DIR")
+    write(BASE + '\n[env]\nCLAUDE_CONFIG_DIR = "/x"\n')
+    fails(capsys, "env.CLAUDE_CONFIG_DIR: hive never sets CLAUDE_CONFIG_DIR")
+
+
+def test_config_dir_must_be_absolute(write, capsys, tmp_path):
+    write(BASE + f'\n[[agents]]\ntype = "a"\ndir = "{tmp_path}"\nconfig_dir = "rel"\n')
+    fails(capsys, "agents[1].config_dir 'rel' must be absolute or start with ~")
+
+
+def test_per_type_env_value_must_be_str(write, capsys, tmp_path):
+    write(BASE + f'\n[[agents]]\ntype = "a"\ndir = "{tmp_path}"\nenv = {{ X = 1 }}\n')
+    fails(capsys, "agents[1].env.X must be a string")
+    write(BASE + '\n[queen]\nenv = "x"\n')
+    fails(capsys, "'queen.env' must be dict")

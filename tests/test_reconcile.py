@@ -1,7 +1,8 @@
 import pytest
 
 from hive.reconcile import (Existing, New, Pane, ResolveError, RunningPane,
-                            desired_panes, plan, resolve_target)
+                            desired_panes, parse_records, plan, resolve_target,
+                            sandbox_type)
 
 
 def make_cfg(agents, roots=(), prefix="swarm"):
@@ -204,3 +205,37 @@ def test_type_override_new_type_tilde_and_search_roots(dirs, monkeypatch):
     assert resolve_target(cfg, "x", "t") == New("t", real, real)
     with pytest.raises(ResolveError, match="no agent type 'zzz'"):
         resolve_target(cfg, "zzz", "t")
+
+
+# parse_records / sandbox_type
+
+def test_parse_records_quoted_values_and_unknown_keys():
+    text = ('name=api config_dir=~/.claude-api extra=1 '
+            'command="claude-supervisor run api -- -n {name} --remote-control {name}"\n'
+            '\n'
+            "name=b config_dir=/b command='x {name} --remote-control' url=a=b\n")
+    records = parse_records(text)
+    assert records[0] == {"name": "api", "config_dir": "~/.claude-api", "extra": "1",
+                          "command": "claude-supervisor run api -- -n {name} --remote-control {name}"}
+    assert records[1]["command"] == "x {name} --remote-control"
+    assert records[1]["url"] == "a=b"
+
+
+@pytest.mark.parametrize("line, msg", [
+    ("name=a command=x", "discover line 1: missing config_dir"),
+    ("name=a config_dir=/c command=\"x", "discover line 1: No closing quotation"),
+    ("name=a config_dir=/c command=x stray", "discover line 1: 'stray' is not key=value"),
+])
+def test_parse_records_errors_name_the_line(line, msg):
+    with pytest.raises(ResolveError, match=msg):
+        parse_records(line + "\n")
+
+
+def test_sandbox_type(tmp_path):
+    (tmp_path / "notes").mkdir()
+    cfg = make_cfg([("obsidian", str(tmp_path), 1)], roots=[tmp_path])
+    assert sandbox_type(cfg, "obsidian", "api") == "obsidian-api"
+    assert sandbox_type(cfg, "notes", "api") == "notes-api"
+    assert sandbox_type(cfg, str(tmp_path / "notes"), "x") == "notes-x"
+    with pytest.raises(ResolveError, match="the queen is always running"):
+        sandbox_type(cfg, "queen", "x")

@@ -14,7 +14,11 @@ command = "claude -n {name} --remote-control {name} --permission-mode auto"
 
 # [queen]                        # optional; the queen always starts, in <config dir>/queen
 # command = "claude -n {name} --remote-control {name} --permission-mode auto"   # default: [defaults] command
-# discover = "claude-supervisor list"   # `hive discover` runs this and prints its output
+# discover = "claude-supervisor list"   # `hive discover` runs this and prints its output; `hive spawn --sandbox NAME` reads it:
+#   one record per line, key=value tokens, spaces double-quoted; required keys name, config_dir, command, e.g.
+#   name=api config_dir=~/.claude-api command="claude-supervisor run api -- -n {name} --remote-control {name}"
+# config_dir = "~/.claude-queen" # Claude config dir of the queen's command; only used to find the trust file, never exported
+# env = { FOO = "bar" }          # per-type env, exported after [env]; not set on the tmux server
 
 [env]                            # optional, exported in every pane before the command
 # SSH_AUTH_SOCK = "$XDG_RUNTIME_DIR/ssh-agent.socket"
@@ -32,3 +36,8 @@ type = "project"
 dir = "~/work/my-project"
 count = 1
 # command = "claude -n {name} --remote-control {name}"   # optional per-type override of defaults.command
+# config_dir = "~/.claude-sandbox"   # optional: Claude config dir of this type's command; only used to find the trust file <config_dir>/.claude.json, never exported
+# env = { FOO = "bar" }              # optional per-type env (also: hive spawn --env KEY=VALUE); CLAUDE_CONFIG_DIR is rejected, use config_dir
+
+# Workspace trust: hive never seeds Claude Code's folder trust silently. `hive spawn` exits 3 for an untrusted
+# directory until you rerun it with --trust; `hive up` / `hive reconcile` warn `untrusted <name> <root>` on stderr.

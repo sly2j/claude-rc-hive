@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,7 @@ command = "sleep 600"
 
 [queen]
 command = "sleep 600"
+discover = "{discover}"
 
 [[agents]]
 type = "a"
@@ -37,7 +39,10 @@ class Hive:
     def __init__(self, tmp_path):
         self.tmp = tmp_path
         self.config = tmp_path / "hive" / "config.toml"
-        self.env = {**os.environ, "XDG_CONFIG_HOME": str(tmp_path), "SHELL": "/bin/sh"}
+        # HOME too, so trust checks read tmp_path/.claude.json, never the real one.
+        self.env = {**os.environ, "XDG_CONFIG_HOME": str(tmp_path), "SHELL": "/bin/sh",
+                    "HOME": str(tmp_path)}
+        self.env.pop("CLAUDE_CONFIG_DIR", None)
 
     def run(self, *args):
         return subprocess.run([sys.executable, "-m", "hive.cli", *args], cwd=ROOT,
@@ -63,7 +68,12 @@ def hive(tmp_path):
     (tmp_path / "b").mkdir()
     cfg = tmp_path / "hive" / "config.toml"
     cfg.parent.mkdir()
-    cfg.write_text(CONFIG.format(socket=SOCKET, a=tmp_path / "a"))
+    # A fake sandbox launcher listing: one record per line.
+    discover = tmp_path / "discover.sh"
+    discover.write_text("#!/bin/sh\necho 'name=api config_dir=%s "
+                        "command=\"sleep 600 # {name} --remote-control\"'\n" % (tmp_path / "cc"))
+    discover.chmod(0o755)
+    cfg.write_text(CONFIG.format(socket=SOCKET, a=tmp_path / "a", discover=discover))
     h = Hive(tmp_path)
     try:
         # Guard: make sure every child talks to the throwaway socket and config
@@ -83,6 +93,10 @@ def test_lifecycle(hive, tmp_path):
     r = h.run("up")
     assert r.returncode == 0, r.stderr
     assert h.names() == {"t-queen", "t-a-1", "t-a-2"}
+    # untrusted panes are started anyway, with a warning; nothing is seeded
+    assert f"untrusted t-a-1 {tmp_path / 'a'}" in r.stderr
+    assert f"untrusted t-queen {tmp_path / 'hive' / 'queen'}" in r.stderr
+    assert not (tmp_path / ".claude.json").exists()
     assert h.windows() == {"t-queen", "t-a"}
     assert h.run("up").stdout.strip() == "no changes"
 
@@ -99,6 +113,23 @@ def test_lifecycle(hive, tmp_path):
     assert "queen name=t-queen running=yes" in out[1]
     agent = next(line for line in out if line.startswith("agent type=a "))
     assert "count=2 running=2" in agent and 'command="sleep 600"' in agent
+    assert agent.endswith(f"trusted=no trust_file={tmp_path / '.claude.json'}")
+    assert sum(line.startswith("pane name=") for line in out) == 3
+    assert not any("waiting=" in line for line in out)
+
+    # a pane showing the trust dialog is reported as waiting
+    a2 = next(line.split()[0] for line in h.tmux(
+        "list-panes", "-s", "-t", "=t-agents", "-F", "#{pane_id} #{@hive_name}").stdout.splitlines()
+        if line.endswith(" t-a-2"))
+    h.tmux("send-keys", "-t", a2, "-l", "Do you trust the files in this folder?")
+    for _ in range(50):
+        out = h.run("list").stdout.splitlines()
+        if f"pane name=t-a-2 type=a id={a2} waiting=trust" in out:
+            break
+        time.sleep(0.1)
+    else:
+        raise AssertionError(out)
+    h.tmux("send-keys", "-t", a2, "C-u")
     assert not any(line.startswith(("drift", "unmanaged")) for line in out)
 
     # an unmanaged pane next to the managed ones
@@ -110,9 +141,20 @@ def test_lifecycle(hive, tmp_path):
     assert len(unmanaged) == 1
     assert any(line.startswith("unmanaged pane=") for line in h.run("list").stdout.splitlines())
 
-    # spawn an existing type
+    # spawn into an untrusted dir: exit 3, nothing changes
+    before = h.config.read_bytes()
     r = h.run("spawn", "a")
+    assert r.returncode == 3
+    root = tmp_path / "a"
+    assert r.stderr == (f"untrusted: {root} (trust root {root}, trust file "
+                        f"{tmp_path / '.claude.json'}); rerun with --trust after the user confirms\n")
+    assert h.config.read_bytes() == before and not (tmp_path / ".claude.json").exists()
+
+    # spawn an existing type with --trust
+    r = h.run("spawn", "a", "--trust")
     assert r.returncode == 0, r.stderr
+    assert f"trusted {root} in {tmp_path / '.claude.json'}" in r.stdout
+    assert "untrusted" not in r.stderr
     assert f"config agent=a count=2->3 file={h.config}" in r.stdout
     assert "started t-a-3" in r.stdout
     assert h.names() == {"t-queen", "t-a-1", "t-a-2", "t-a-3"}
@@ -130,10 +172,38 @@ def test_lifecycle(hive, tmp_path):
     assert r.returncode == 2 and "cannot stop 2" in r.stderr
 
     # spawn a new directory: new entry, new window
-    r = h.run("spawn", str(tmp_path / "b"))
+    r = h.run("spawn", str(tmp_path / "b"), "--trust")
     assert r.returncode == 0, r.stderr
     assert "config agent=b count=0->1" in r.stdout
     assert "started t-b-1" in r.stdout
+
+    # --sandbox: command and config_dir from discover; trust lives in the sandbox's store
+    cc = tmp_path / "cc"
+    before = h.config.read_bytes()
+    r = h.run("spawn", "b", "--sandbox", "api")
+    assert r.returncode == 3 and f"trust file {cc / '.claude.json'})" in r.stderr
+    assert h.config.read_bytes() == before
+    for bad, msg in ((["--sandbox", "nope"], "no sandbox 'nope' in discover output; available: api"),
+                     (["--sandbox", "api", "--command", "x {name} --remote-control"],
+                      "do not combine it with --command or --config-dir"),
+                     (["--env", "CLAUDE_CONFIG_DIR=/x"], "hive never sets CLAUDE_CONFIG_DIR")):
+        r = h.run("spawn", "b", *bad)
+        assert r.returncode == 2 and msg in r.stderr, r.stderr
+    assert h.config.read_bytes() == before
+    r = h.run("spawn", "b", "--sandbox", "api", "--trust")
+    assert r.returncode == 0, r.stderr
+    assert f"trusted {tmp_path / 'b'} in {cc / '.claude.json'}" in r.stdout
+    assert "config agent=b-api count=0->1" in r.stdout and "started t-b-api-1" in r.stdout
+    text = h.config.read_text()
+    assert 'command = "sleep 600 # {name} --remote-control"' in text
+    assert f'config_dir = "{cc}"' in text
+    out = h.run("list").stdout.splitlines()
+    assert next(line for line in out if line.startswith("agent type=b-api ")).endswith(
+        f"trusted=yes trust_file={cc / '.claude.json'}")
+    assert next(line for line in out if line.startswith("agent type=b ")).endswith(
+        f"trusted=yes trust_file={tmp_path / '.claude.json'}")
+    r = h.run("stop", "b-api")
+    assert r.returncode == 0 and "stopped t-b-api-1" in r.stdout
     assert h.windows() == {"t-queen", "t-a", "t-b"}
     assert h.names() == {"t-queen", "t-a-1", "t-b-1"}
     assert 'type = "b"' in h.config.read_text()

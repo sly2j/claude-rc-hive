@@ -236,3 +236,26 @@ def test_write_atomic_cleans_up_on_failure(tmp_path, monkeypatch):
         write_atomic(path, "new\n")
     assert path.read_text() == "old\n"
     assert os.listdir(tmp_path) == ["config.toml"]
+
+
+def test_append_agent_env_inline_table():
+    env = {"FOO": "/c d", "Q": 'a"b'}
+    new = append_agent(EXAMPLE, "e", "/e", 1, None, env)
+    assert changes(EXAMPLE, new)[-1] == '+env = { FOO = "/c d", Q = "a\\"b" }'
+    verify(EXAMPLE, new, append_mutation(type="e", dir="/e", count=1, env=env))
+    # the inline table does not split the block: set_count still finds it
+    assert "\ncount = 4\n" in edit_count(new, "e", 4)
+
+
+def test_append_agent_env_bad_key():
+    with pytest.raises(EditError, match="env key"):
+        append_agent(EXAMPLE, "e", "/e", 1, None, {"A-B": "x"})
+
+
+def test_append_agent_config_dir():
+    new = append_agent(EXAMPLE, "s", "/s", 1, "c {name} --remote-control", None, "~/.cc")
+    assert changes(EXAMPLE, new)[-2:] == ['+command = "c {name} --remote-control"',
+                                          '+config_dir = "~/.cc"']
+    verify(EXAMPLE, new, append_mutation(type="s", dir="/s", count=1,
+                                         command="c {name} --remote-control",
+                                         config_dir="~/.cc"))

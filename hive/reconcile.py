@@ -3,7 +3,8 @@
 No tmux and no process exits here; errors are raised as ResolveError.
 """
 
-from dataclasses import dataclass
+import shlex
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -15,6 +16,8 @@ class Pane:
     index: int
     dir: str
     command: str  # unexpanded template
+    env: dict = field(default_factory=dict)  # the type's own env, exported after [env]
+    config_dir: str | None = None  # Claude config dir of the command; locates the trust file
 
 
 @dataclass(frozen=True)
@@ -33,12 +36,14 @@ def desired_panes(cfg):
     prefix = cfg["prefix"]
     queen = cfg["queen"]
     name = f"{prefix}-queen"
-    panes = [Pane(name, name, "queen", 1, queen["dir"], queen["command"])]
+    panes = [Pane(name, name, "queen", 1, queen["dir"], queen["command"],
+                  queen.get("env", {}), queen.get("config_dir"))]
     for agent in cfg["agents"]:
         window = f"{prefix}-{agent['type']}"
         for i in range(1, agent["count"] + 1):
             panes.append(Pane(f"{window}-{i}", window, agent["type"], i,
-                              agent["dir"], agent["command"]))
+                              agent["dir"], agent["command"], agent.get("env", {}),
+                              agent.get("config_dir")))
     return panes
 
 
@@ -114,6 +119,45 @@ def _target_dir(cfg, target):
         return d, target if target.startswith("~") else d
     d = _path_dir(_search_hit(cfg, target))
     return d, d
+
+
+def sandbox_type(cfg, target, sandbox):
+    """Default type for --sandbox: TARGET's type, else its directory name, plus -<sandbox>."""
+    if target == "queen":
+        raise ResolveError(QUEEN_ERROR)
+    entry = _entry(cfg, target)
+    base = entry["type"] if entry else Path(_target_dir(cfg, target)[0]).name
+    return f"{base}-{sandbox}"
+
+
+RECORD_KEYS = ("name", "config_dir", "command")
+
+
+def parse_records(text):
+    """Parse `[queen] discover` output: one record per line of key=value tokens.
+
+    Values with spaces are double-quoted (shell rules). Unknown keys are kept but
+    ignored by callers; blank lines are skipped.
+    """
+    records = []
+    for n, line in enumerate(text.splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            tokens = shlex.split(line)
+        except ValueError as e:
+            raise ResolveError(f"discover line {n}: {e}: {line}")
+        record = {}
+        for token in tokens:
+            key, sep, value = token.partition("=")
+            if not sep or not key:
+                raise ResolveError(f"discover line {n}: '{token}' is not key=value: {line}")
+            record[key] = value
+        missing = [k for k in RECORD_KEYS if k not in record]
+        if missing:
+            raise ResolveError(f"discover line {n}: missing {', '.join(missing)}: {line}")
+        records.append(record)
+    return records
 
 
 def resolve_target(cfg, target, type_override=None):
