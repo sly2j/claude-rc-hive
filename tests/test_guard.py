@@ -39,6 +39,10 @@ def tool(qdir, name, **tool_input):
     'hive inspect-launcher "claude -n x --remote-control x"',
     'hive spawn ~/work/api --command "claude -n {name} --remote-control {name}"',
     f"{HOME}/.local/bin/hive list",
+    "hive dirs",
+    "hive dirs ~/work",
+    "hive dirs claude-rc-hive --depth 2",
+    "hive roots add ~/projects",
 ])
 def test_bash_allows_hive(qdir, command):
     assert bash(qdir, command) == (0, "")

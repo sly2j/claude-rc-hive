@@ -19,8 +19,9 @@ from importlib import resources
 from importlib.metadata import PackageNotFoundError, version as pkg_version
 from pathlib import Path
 
-from hive.configedit import (ENV_KEY_RE, EditError, append_agent, set_count, verify,
-                             write_atomic)
+from hive.configedit import (ENV_KEY_RE, EditError, append_agent, set_count,
+                             set_search_roots, verify, write_atomic)
+from hive.dirs import MAX_DEPTH, PRIVATE_NAMES, list_dirs
 from hive.inspect import DEFAULT_ROOTS, inspect_launcher
 from hive.reconcile import (Existing, ResolveError, RunningPane, desired_panes,
                             parse_records, plan, resolve_target, sandbox_type)
@@ -710,6 +711,53 @@ def cmd_inspect_launcher(cfg, args):
     return inspect_launcher(args.launch_command, cfg["inspect_roots"], sys.stdout, sys.stderr)
 
 
+def cmd_dirs(cfg, args):
+    return list_dirs(cfg, args.root, args.depth, sys.stdout, sys.stderr)
+
+
+def same_dir(text, resolved):
+    return Path(text).expanduser().resolve() == resolved
+
+
+def cmd_roots(cfg, args):
+    if args.action is None:
+        if args.path is not None:
+            die("hive roots takes 'add PATH' or 'remove PATH'")
+        for r in cfg["search_roots"]:
+            print(f"root={Path(r).absolute()}")
+        if not cfg["search_roots"]:
+            print("roots=none")
+        return 0
+    if args.path is None:
+        die(f"hive roots {args.action} needs a PATH")
+    with open(cfg["config_path"], "rb") as f:
+        raw = tomllib.load(f).get("search_roots", [])
+    resolved = Path(args.path).expanduser().resolve()
+    if args.action == "remove":
+        i = next((i for i, r in enumerate(raw) if same_dir(r, resolved)), None)
+        if i is None:
+            print(f"not found: {resolved} is not in search_roots", file=sys.stderr)
+            return 2
+        edit_config(cfg, lambda text: set_search_roots(text, raw[:i] + raw[i + 1:]),
+                    lambda doc: doc["search_roots"].pop(i))
+        print(f"removed {raw[i]}")
+        return 0
+    given = Path(args.path).expanduser()
+    if any(p.lower() in PRIVATE_NAMES for p in (*given.parts, *resolved.parts)):
+        print(f"refused: {resolved} is under a secrets/private path", file=sys.stderr)
+        return 3
+    if not resolved.is_dir():
+        die(f"'{args.path}' is not an existing directory")
+    if any(same_dir(r, resolved) for r in raw):
+        print("unchanged")
+        return 0
+    spelling = os.path.normpath(args.path) if args.path.startswith("~") else str(resolved)
+    edit_config(cfg, lambda text: set_search_roots(text, [*raw, spelling]),
+                lambda doc: doc.setdefault("search_roots", []).append(spelling))
+    print(f"added {spelling}")
+    return 0
+
+
 def cmd_discover(cfg, args):
     if not cfg["discover"]:
         die("no discover command configured; set [queen] discover", 2)
@@ -785,6 +833,13 @@ def positive_int(text):
     return value
 
 
+def depth_int(text):
+    value = positive_int(text)
+    if value > MAX_DEPTH:
+        raise argparse.ArgumentTypeError(f"must be <= {MAX_DEPTH}")
+    return value
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="hive", description="Run N instances of each agent kind in tmux panes.")
@@ -816,6 +871,14 @@ def build_parser():
     p = sub.add_parser("reconcile", help="make the running session match the config")
     p.add_argument("--dry-run", action="store_true", help="only print what would change")
     sub.add_parser("discover", help="run [queen] discover and print its output")
+    p = sub.add_parser("dirs", help="read-only: list directories under search_roots")
+    p.add_argument("root", metavar="ROOT", nargs="?",
+                   help="a search root, a directory inside one, or a name as for spawn")
+    p.add_argument("--depth", type=depth_int, default=1, metavar="N",
+                   help=f"levels to list (default 1, max {MAX_DEPTH})")
+    p = sub.add_parser("roots", help="show search_roots, or add/remove one (edits config)")
+    p.add_argument("action", nargs="?", choices=["add", "remove"])
+    p.add_argument("path", nargs="?", metavar="PATH")
     p = sub.add_parser("inspect-launcher",
                        help="read-only: show a launcher's CLAUDE_CONFIG_DIR evidence (files under inspect_roots only)")
     p.add_argument("launch_command", metavar="COMMAND", help="the full launch command, as one argument")
@@ -842,7 +905,8 @@ def main():
     handlers = {"up": cmd_up, "down": cmd_down, "restart": cmd_restart,
                 "status": cmd_status, "attach": cmd_attach, "list": cmd_list,
                 "spawn": cmd_spawn, "stop": cmd_stop, "reconcile": cmd_reconcile,
-                "discover": cmd_discover, "inspect-launcher": cmd_inspect_launcher}
+                "discover": cmd_discover, "inspect-launcher": cmd_inspect_launcher,
+                "dirs": cmd_dirs, "roots": cmd_roots}
     return handlers[args.command](cfg, args)
 
 

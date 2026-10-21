@@ -91,6 +91,42 @@ def append_agent(text, type_, dir_, count, command=None, env=None, config_dir=No
     return head + "\n\n" + block if head.strip() else block
 
 
+ROOTS_RE = re.compile(r"^(\s*search_roots\s*=\s*)(\[.*?\])(\s*(#.*)?)$")
+ROOTS_KEY_RE = re.compile(r"^\s*search_roots\s*=")
+TABLE_RE = re.compile(r"^\s*\[")
+
+
+def _parses(line):
+    try:
+        tomllib.loads(line)
+        return True
+    except tomllib.TOMLDecodeError:
+        return False
+
+
+def set_search_roots(text, roots):
+    """Rewrite the top-level `search_roots = [...]` line with `roots` (strings, written as
+    given), or insert it after the last top-level key when absent."""
+    lines = text.splitlines(keepends=True)
+    first_table = next((i for i, line in enumerate(lines) if TABLE_RE.match(line)), len(lines))
+    value = "[" + ", ".join(toml_string(r) for r in roots) + "]"
+    for i in range(first_table):
+        if not ROOTS_KEY_RE.match(lines[i]):
+            continue
+        body = lines[i].rstrip("\r\n")
+        m = ROOTS_RE.match(body)
+        if not m:
+            raise EditError("search_roots is not a one-line array; edit it by hand")
+        lines[i] = m.group(1) + value + m.group(3) + lines[i][len(body):]
+        return "".join(lines)
+    keys = [i for i in range(first_table) if KEY_RE.match(lines[i]) and _parses(lines[i])]
+    at = keys[-1] + 1 if keys else first_table
+    if at > 0 and not lines[at - 1].endswith(("\n", "\r")):
+        lines[at - 1] += "\n"
+    lines.insert(at, f"search_roots = {value}\n")
+    return "".join(lines)
+
+
 def verify(old_text, new_text, mutate, path="config"):
     """Require new_text to parse to old_text's document with `mutate` applied."""
     expected = tomllib.loads(old_text)
