@@ -9,7 +9,7 @@
 
 [defaults]
 # Placeholders: {name} = "<prefix>-<type>-<index>", {type}, {index}, {dir}, {prefix}
-command = "claude -n {name} --remote-control {name} --permission-mode acceptEdits"
+command = "claude -n {name} --remote-control {name} --permission-mode auto"
 
 [env]                            # optional, exported in every pane before the command
 # SSH_AUTH_SOCK = "$XDG_RUNTIME_DIR/ssh-agent.socket"
