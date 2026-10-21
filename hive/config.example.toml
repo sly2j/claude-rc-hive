@@ -6,10 +6,15 @@
 # tmux_socket = "hive"           # tmux -L name; default "hive"
 # login_shell = true             # default true: panes run "<shell> -l" so the login profile applies
 # shell = "/bin/bash"            # default: login shell from passwd, else $SHELL, else /bin/sh
+# search_roots = ["~/work", "~/notes"]   # where `hive spawn NAME` looks for a directory NAME
 
 [defaults]
 # Placeholders: {name} = "<prefix>-<type>-<index>", {type}, {index}, {dir}, {prefix}
 command = "claude -n {name} --remote-control {name} --permission-mode auto"
+
+# [queen]                        # optional; the queen always starts, in <config dir>/queen
+# command = "claude -n {name} --remote-control {name} --permission-mode auto"   # default: [defaults] command
+# discover = "claude-supervisor list"   # `hive discover` runs this and prints its output
 
 [env]                            # optional, exported in every pane before the command
 # SSH_AUTH_SOCK = "$XDG_RUNTIME_DIR/ssh-agent.socket"
@@ -20,7 +25,7 @@ command = "claude -n {name} --remote-control {name} --permission-mode auto"
 [[agents]]                       # one tmux window per type, one pane per instance
 type = "notes"                   # required, unique; window "<prefix>-<type>"
 dir = "~/notes"                  # must exist
-count = 2                        # panes; default 1
+count = 2                        # panes; default 1; 0 keeps the entry without panes
 
 [[agents]]
 type = "project"

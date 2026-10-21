@@ -13,6 +13,8 @@ uv tool install .            # from a checkout of this repo
 
 Debian 13 follows PEP 668, so `pip install --user` is blocked; use uv or pipx.
 
+Needs tmux >= 3.0 (panes are tagged with a pane option, `@hive_name`; hive 1.5 only needed 2.6).
+
 Update after pulling or changing the repo (both were verified to pick up a new `VERSION` and changed sources):
 
 ```sh
@@ -32,12 +34,15 @@ Then `hive init` writes `${XDG_CONFIG_HOME:-~/.config}/hive/config.toml` from th
 | `tmux_socket` | `tmux -L` server name. Default: `hive`. |
 | `login_shell` | `true` (default): each pane runs `<shell> -l`, so your login profile applies. `false`: panes run tmux's `default-command`. |
 | `shell` | Shell for `login_shell`. Default: your login shell from passwd, else `$SHELL`, else `/bin/sh`. |
+| `search_roots` | Optional list of directories (`~` expanded) where `hive spawn NAME` looks for a directory `NAME`. Missing roots are skipped. |
 | `[defaults] command` | Command for every agent type without its own `command`. |
+| `[queen] command` | Optional command for the queen. Default: `[defaults] command`, else `claude -n {name} --remote-control {name} --permission-mode auto`. |
+| `[queen] discover` | Optional shell command that `hive discover` runs; its output is printed as is. |
 | `[env]` | Optional `KEY = "value"` strings, exported in every pane before the command. Values go inside double quotes in the pane shell: `$VAR` expands there, `\`, `"` and backticks are escaped. They are also set on the hive tmux server (`set-environment -g`, `$VAR` expanded by hive), so panes opened later inherit them. For anything your login profile does not set. |
 | `[service] after` | Optional list of units added to `After=` in `hive.service`. |
-| `[[agents]] type` | Required, unique. Window name is `<prefix>-<type>`. |
-| `[[agents]] dir` | Required, `~` expanded, must exist (checked by `up` and `restart`). Each pane starts with `cd <dir>`. |
-| `[[agents]] count` | Number of panes, integer >= 1. Default: 1. |
+| `[[agents]] type` | Required, unique, not `queen`. Window name is `<prefix>-<type>`. |
+| `[[agents]] dir` | Required, `~` expanded, must exist (checked by `up`, `restart`, `spawn`, `stop` and `reconcile`). Each pane starts with `cd <dir>`. |
+| `[[agents]] count` | Number of panes, integer >= 0. Default: 1. `0` keeps the entry (dir, command, comments) without panes. |
 | `[[agents]] command` | Optional override of `defaults.command`. One of the two is required. |
 
 Placeholders in commands, replaced by plain text substitution (other braces such as `${VAR}` are untouched): `{name}` = `<prefix>-<type>-<index>` (index starts at 1), `{type}`, `{index}`, `{dir}`, `{prefix}`.
@@ -46,11 +51,16 @@ Placeholders in commands, replaced by plain text substitution (other braces such
 
 | Command | Does |
 | --- | --- |
-| `hive up` | Start the session if it is not running (otherwise says so, exit 0). |
+| `hive up` | Start the session if it is not running, with the queen first. If it is running, reconcile it with the config: start missing panes, stop managed panes that are no longer in the config, leave unmanaged panes alone, never stop the queen. |
 | `hive down` | Kill the session, and the hive tmux server once it is empty. |
 | `hive restart` | `systemctl --user restart hive.service` if that unit is active, else `down` then `up`. |
 | `hive status` | Windows, panes, pane titles and running commands; exit 1 if not running. |
 | `hive attach` | Attach to the session. |
+| `hive list` | Config and running state side by side (`key=value` lines), unmanaged panes, and drift. |
+| `hive spawn TARGET [-n N] [--type TYPE] [--command CMD]` | Add N workers (default 1): raise `count` of the type TARGET names, or add an `[[agents]]` entry for a directory (absolute, `~/...`, or a name under `search_roots`), then reconcile. `--command` must contain `{name}` and `--remote-control`. If the session is not running, only the config is updated. |
+| `hive stop TARGET [-n N]` | Remove N workers (default 1) of an existing type: lower `count`, then reconcile. The highest indices go first; the entry stays at `count = 0`. |
+| `hive reconcile [--dry-run]` | Make the running session match the config; `--dry-run` only prints `would start` / `would stop`. Exit 1 if not running. |
+| `hive discover` | Run `[queen] discover` and print its output. |
 | `hive init` | Write the example config if none exists. |
 | `hive install-service [--enable]` | Write `~/.config/systemd/user/hive.service` and reload; `--enable` also runs `enable --now`. |
 | `hive uninstall-service` | Disable, remove the unit, reload. |
@@ -58,7 +68,21 @@ Placeholders in commands, replaced by plain text substitution (other braces such
 
 Panes are titled with the agent name and the app may not override it (`allow-set-title off`). Each pane runs a login shell and the command is typed into it, so the shell stays after the command exits (the pane closes only when you `exit` that shell).
 
+Apply config changes with `hive up`: it reconciles a running session, so adding, removing or recounting agents needs no restart. Changes to `dir` or `command` of panes that are already running are not applied; stop and re-spawn them, or `hive restart`. Session-level keys (`prefix`, `session`, `tmux_socket`, `shell`, `login_shell`, `[env]` for existing panes) also need `hive restart`.
+
+hive identifies its panes by the tmux pane option `@hive_name`, so the index in a name (`<prefix>-<type>-<index>`) is hive's. tmux's own `pane_index` (shown by `hive status`) is positional and shifts when a pane is closed. Panes with no hive name are unmanaged and are never touched.
+
+Upgrading from 1.5: panes started by 1.5 carry only a title. `hive up` adopts them by exact title match while the config still names them; any other pane stays unmanaged until `hive restart`. The first `hive up` after the upgrade also adds the queen to the running session.
+
 Run `hive up` from a plain shell, not from inside a Claude Code session: the tmux server inherits the caller's environment (for example the `CLAUDECODE` variables).
+
+## Queen
+
+The queen is a persistent Claude session, window `<prefix>-queen`, always started first with Remote Control on. It runs the `hive` commands for you: ask it for "one more X" or "one less X" and it edits `config.toml` through `hive spawn` and `hive stop`, which then reconcile the session. Config stays the single source of truth; the queen is never stopped by reconcile, only by `hive down`.
+
+Its directory is `${XDG_CONFIG_HOME:-~/.config}/hive/queen`. hive manages `CLAUDE.md` and `.claude/settings.json` there and re-writes them whenever the queen starts and they differ from the packaged copy, so `uv tool upgrade hive` plus the next `hive up` re-syncs them. Put your own additions in `CLAUDE.local.md`; hive never writes it.
+
+First start: Claude Code asks to trust the new directory. Attach once (`hive attach`) and accept; until then `hive` calls go through the permission mode's approval.
 
 ## Pane environment
 

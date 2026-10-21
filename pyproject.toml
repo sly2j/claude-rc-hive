@@ -25,7 +25,7 @@ dev = ["pytest>=8"]
 packages = ["hive"]
 
 [tool.setuptools.package-data]
-hive = ["config.example.toml"]
+hive = ["config.example.toml", "queen/*"]
 
 [tool.setuptools.dynamic]
 version = {file = "VERSION"}
