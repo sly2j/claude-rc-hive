@@ -18,6 +18,9 @@ Repository = "https://github.com/sly2j/claude-rc-hive"
 [project.scripts]
 hive = "hive.cli:main"
 
+[dependency-groups]
+dev = ["pytest>=8"]
+
 [tool.setuptools]
 packages = ["hive"]
 
