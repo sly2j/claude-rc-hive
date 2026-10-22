@@ -171,7 +171,17 @@ def test_init_writes_a_config_that_up_accepts(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     assert cli.cmd_init(None) == 0
-    cfg = cli.load_config(check_dirs=True)
+    cfg = cli.load_config()
     assert cfg["agents"] == []
     assert cfg["queen"]["command"] == cli.DEFAULT_QUEEN_COMMAND
     assert [p.name for p in cli.desired_panes(cfg)] == [f"{cfg['prefix']}-queen"]
+
+
+def test_env_names_are_checked(write, capsys):
+    write(BASE + '\n[env]\n"A B" = "x"\n')
+    fails(capsys, "env.A B: env names must match")
+
+
+def test_missing_agent_dir_is_not_a_load_error(write, tmp_path):
+    write(BASE + f'\n[[agents]]\ntype = "gone"\ndir = "{tmp_path / "gone"}"\n')
+    assert cli.load_config()["agents"][0]["type"] == "gone"

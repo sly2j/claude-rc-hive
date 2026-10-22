@@ -273,3 +273,31 @@ def test_lifecycle(hive, tmp_path):
     assert r.returncode == 0
     assert h.tmux("has-session", "-t", "=t-agents").returncode != 0
     assert "running=no" in h.run("list").stdout.splitlines()[0]
+
+
+def test_missing_dir_is_skipped_and_claude_env_is_dropped(hive, tmp_path):
+    h = hive
+    gone = tmp_path / "gone"
+    with open(h.config, "a") as f:
+        f.write(f'\n[[agents]]\ntype = "gone"\ndir = "{gone}"\n')
+    # as if `hive up` ran from inside a Claude Code session
+    h.env["CLAUDECODE"] = "1"
+    r = h.run("reconcile", "--dry-run")
+    assert r.returncode == 1  # not running yet
+    r = h.run("up")
+    assert r.returncode == 0, r.stderr
+    assert f"skipped t-gone-1: dir {gone} does not exist" in r.stderr
+    assert h.names() == {"t-queen", "t-a-1", "t-a-2"}
+    assert h.tmux("show-environment", "-g", "CLAUDECODE").returncode != 0
+    r = h.run("reconcile", "--dry-run")
+    assert f"would skip t-gone-1: dir {gone} does not exist" in r.stderr
+    out = h.run("list").stdout.splitlines()
+    assert next(l for l in out if l.startswith("agent type=gone ")).endswith(" dir_missing=yes")
+    assert "dir_missing" not in next(l for l in out if l.startswith("agent type=a "))
+    r = h.run("spawn", "gone", "--trust")
+    assert r.returncode == 2 and "does not exist" in r.stderr
+    r = h.run("stop", "gone")
+    assert r.returncode == 0, r.stderr
+    gone.mkdir()
+    r = h.run("spawn", "gone", "--trust")
+    assert r.returncode == 0 and "started t-gone-1" in r.stdout, r.stderr

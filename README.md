@@ -40,10 +40,10 @@ Then `hive init` writes `${XDG_CONFIG_HOME:-~/.config}/hive/config.toml` from th
 | `[queen] discover` | Optional shell command that `hive discover` runs; its output is printed as is. `hive spawn --sandbox NAME` also runs it and reads one record per line (see `hive discover`). |
 | `[queen] config_dir` | Optional absolute path (`~` expanded): the Claude config dir the queen's command uses. Only used to find the trust file `<config_dir>/.claude.json`; never exported. |
 | `[queen] env` | Optional inline table, same rules as `[[agents]] env`, for the queen's pane. |
-| `[env]` | Optional `KEY = "value"` strings, exported in every pane before the command. Values go inside double quotes in the pane shell: `$VAR` expands there, `\`, `"` and backticks are escaped. They are also set on the hive tmux server (`set-environment -g`, `$VAR` expanded by hive), so panes opened later inherit them. For anything your login profile does not set. `CLAUDE_CONFIG_DIR` is rejected here too; use `config_dir`. |
+| `[env]` | Optional `KEY = "value"` strings (names match `[A-Za-z_][A-Za-z0-9_]*`, as for all env tables), exported in every pane before the command. Values go inside double quotes in the pane shell: `$VAR` expands there, `\`, `"` and backticks are escaped. They are also set on the hive tmux server (`set-environment -g`, `$VAR` expanded by hive), so panes opened later inherit them. For anything your login profile does not set. `CLAUDE_CONFIG_DIR` is rejected here too; use `config_dir`. |
 | `[service] after` | Optional list of units added to `After=` in `hive.service`. |
 | `[[agents]] type` | Required, unique, not `queen`. Window name is `<prefix>-<type>`. |
-| `[[agents]] dir` | Required, `~` expanded, must exist (checked by `up`, `restart`, `spawn`, `stop` and `reconcile`). Each pane starts with `cd <dir>`. |
+| `[[agents]] dir` | Required, `~` expanded. Each pane starts with `cd <dir>`. If it does not exist, `up`, `restart` and `reconcile` print `skipped <name>: dir <dir> does not exist` to stderr and start everything else, `hive list` marks the type `dir_missing=yes`, and `spawn` of that type is refused. |
 | `[[agents]] count` | Number of panes, integer >= 0. Default: 1. `0` keeps the entry (dir, command, comments) without panes. |
 | `[[agents]] command` | Optional override of `defaults.command`. One of the two is required. |
 | `[[agents]] env` | Optional inline table of string values, e.g. `env = { FOO = "bar" }`. Exported in that type's panes after the global `[env]`, so it wins. Unlike `[env]`, not set on the tmux server. `spawn --env` names must match `[A-Za-z_][A-Za-z0-9_]*`. `CLAUDE_CONFIG_DIR` is rejected (hive never sets it); use `config_dir`. |
@@ -59,7 +59,7 @@ Placeholders in commands, replaced by plain text substitution (other braces such
 | `hive down` | Kill the session, and the hive tmux server once it is empty. |
 | `hive restart` | `systemctl --user restart hive.service` if that unit is active, else `down` then `up`. |
 | `hive status` | Windows, panes, pane titles and running commands; exit 1 if not running. |
-| `hive attach` | Attach to the session. |
+| `hive attach` | Attach to the session (exit 1 if not running). |
 | `hive list` | Config and running state side by side (`key=value` lines), unmanaged panes, and drift. The `queen` and `agent` lines carry `trusted=yes\|no trust_file=<path>`. Each running managed pane gets a `pane name=<name> type=<type> id=<pane id>` record, with ` waiting=trust` when its screen shows the trust dialog. |
 | `hive spawn TARGET [-n N] [--type TYPE] [--command CMD \| --sandbox NAME] [--config-dir PATH] [--env KEY=VALUE ...] [--trust]` | Add N workers (default 1): raise `count` of the type TARGET names, or add an `[[agents]]` entry for a directory (absolute, `~/...`, or a name under `search_roots`), then reconcile. `--command` must contain `{name}` and `--remote-control`. `--config-dir` writes `config_dir` into the new entry. `--sandbox NAME` takes `command` and `config_dir` from the `hive discover` record `name=NAME` (error if `[queen] discover` is unset or NAME is unknown) and defaults the type to `<base>-<NAME>`, base being TARGET's type or the directory's basename; it cannot be combined with `--command` or `--config-dir`. For an existing type, a different `command`, `config_dir` or `--env` set is rejected (exit 2, use a new `--type`). `--env` (repeatable) fills the new entry's `env` table. Exits 3 without changes if the directory is untrusted, unless `--trust` is given (see Workspace trust). If the session is not running, only the config is updated. |
 | `hive stop TARGET [-n N]` | Remove N workers (default 1) of an existing type: lower `count`, then reconcile. The highest indices go first; the entry stays at `count = 0`. |
@@ -81,7 +81,9 @@ hive identifies its panes by the tmux pane option `@hive_name`, so the index in 
 
 Upgrading from 1.5: panes started by 1.5 carry only a title. `hive up` adopts them by exact title match while the config still names them; any other pane stays unmanaged until `hive restart`. The first `hive up` after the upgrade also adds the queen to the running session.
 
-Run `hive up` from a plain shell, not from inside a Claude Code session: the tmux server inherits the caller's environment (for example the `CLAUDECODE` variables).
+The tmux server inherits the environment of the `hive` call that starts it. hive drops the variables Claude Code sets for its child processes (`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_SESSION_ID` and the like) from its tmux calls, so starting the hive from inside a Claude session does not make every agent think it is nested in it; anything else in that shell's environment still reaches the panes.
+
+Commands that change the config or the session (`up`, `down`, `restart`, `spawn`, `stop`, `reconcile`, `roots add|remove`) take a lock on `${XDG_CONFIG_HOME:-~/.config}/hive/.lock`, so the queen and you can run them at the same time; a command waits up to 30 s for it, then exits 1.
 
 ## Queen
 
@@ -111,7 +113,7 @@ The reason: `hive down` and `systemctl --user stop hive` must never touch other 
 
 ## systemd service
 
-`hive install-service --enable` writes the unit below (the `After=` list comes from `[service] after`) and starts it at login/boot:
+`hive install-service --enable` writes the unit below (`ExecStart`/`ExecStop` use the `hive` found on `PATH` if it is not `~/.local/bin/hive`) (the `After=` list comes from `[service] after`) and starts it at login/boot:
 
 ```ini
 [Unit]

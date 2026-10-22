@@ -5,6 +5,7 @@ each instance a pane. All tmux calls go to a dedicated server (tmux -L <socket>)
 """
 
 import argparse
+import fcntl
 import json
 import os
 import pwd
@@ -14,6 +15,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 import tomllib
 from importlib import resources
 from importlib.metadata import PackageNotFoundError, version as pkg_version
@@ -49,8 +51,8 @@ After={after}
 Type=oneshot
 RemainAfterExit=yes
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=%h/.local/bin/hive up
-ExecStop=%h/.local/bin/hive down
+ExecStart={exe} up
+ExecStop={exe} down
 # The tmux server forked by `hive up` stays in this cgroup while the unit is
 # active. tmux may move pane processes into their own tmux-spawn-*.scope units;
 # `hive down` ends them by killing the session.
@@ -74,6 +76,30 @@ def config_path():
     return config_home() / "hive" / "config.toml"
 
 
+LOCK_WAIT = 30.0
+_lock = None
+
+
+def hold_lock():
+    """Serialize commands that edit the config or the session, until exit."""
+    global _lock
+    if _lock is not None:
+        return
+    path = config_home() / "hive" / ".lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    f = open(path, "a")
+    deadline = time.monotonic() + LOCK_WAIT
+    while True:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            if time.monotonic() > deadline:
+                die(f"another hive command holds {path}; try again", 1)
+            time.sleep(0.1)
+    _lock = f
+
+
 # --- config ---------------------------------------------------------------
 
 def check_keys(table, allowed, where, path):
@@ -95,6 +121,8 @@ CONFIG_DIR_ENV_MSG = ("hive never sets CLAUDE_CONFIG_DIR (the launched command d
 def check_env(env, where, path):
     check_type(env, dict, where, path)
     for key, value in env.items():
+        if not ENV_KEY_RE.fullmatch(key):
+            die(f"{path}: {where}.{key}: env names must match {ENV_KEY_RE.pattern}")
         if not isinstance(value, str):
             die(f"{path}: {where}.{key} must be a string")
         if key == "CLAUDE_CONFIG_DIR":
@@ -110,7 +138,7 @@ def check_config_dir(table, where, path):
     return expand_config_dir(value, f"{path}: {where}.config_dir")
 
 
-def load_config(check_dirs=False):
+def load_config():
     path = config_path()
     if not path.exists():
         die(f"{path} not found; run 'hive init' to create it")
@@ -201,8 +229,6 @@ def load_config(check_dirs=False):
         seen.add(kind)
 
         directory = Path(entry["dir"]).expanduser()
-        if check_dirs and not directory.is_dir():
-            die(f"{path}: {where}.dir '{directory}' is not an existing directory")
 
         count = entry.get("count", 1)
         check_type(count, int, f"{where}.count", path)
@@ -255,10 +281,24 @@ def expand(command, **values):
 
 # --- tmux -----------------------------------------------------------------
 
+# Set by Claude Code for its child processes. A tmux server started from inside a
+# Claude session would hand them to every pane, and claude in a pane would then
+# think it is nested in that session.
+CLAUDE_SESSION_ENV = {"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID",
+                      "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_BRIDGE_SESSION_ID",
+                      "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN",
+                      "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_EXECPATH",
+                      "CLAUDE_CODE_SSE_PORT", "CLAUDE_PID", "CLAUDE_EFFORT"}
+
+
+def tmux_env():
+    return {k: v for k, v in os.environ.items() if k not in CLAUDE_SESSION_ENV}
+
+
 def tmux(cfg, *args, check=True):
     cmd = ["tmux", "-L", cfg["socket"], *args]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, env=tmux_env())
     except FileNotFoundError:
         die("tmux not found in PATH", 1)
     if check and result.returncode != 0:
@@ -411,6 +451,11 @@ def reconcile(cfg, dry_run=False, announce_idle=True):
     windows = None
     for pane in to_start:
         acted = True
+        if pane.name != queen_name and not Path(pane.dir).is_dir():
+            # One stale entry must not keep the rest of the hive down.
+            print(f"{'would skip' if dry_run else 'skipped'} {pane.name}: "
+                  f"dir {pane.dir} does not exist", file=sys.stderr)
+            continue
         warn_untrusted(cfg, pane)
         if dry_run:
             print(f"would start {pane.name}")
@@ -485,6 +530,7 @@ def cmd_restart(cfg, args):
     if systemd_unit_active():
         # Restart through systemd so the tmux server stays in the service cgroup.
         return subprocess.run(["systemctl", "--user", "restart", UNIT_NAME]).returncode
+    hold_lock()
     cmd_down(cfg, args)
     return cmd_up(cfg, args)
 
@@ -508,6 +554,8 @@ def cmd_status(cfg, args):
 
 
 def cmd_attach(cfg, args):
+    if not session_running(cfg):
+        die(f"session {cfg['session']} not running; run 'hive up'", 1)
     os.execvp("tmux", ["tmux", "-L", cfg["socket"], "attach", "-t", cfg["session"]])
 
 
@@ -531,7 +579,8 @@ def cmd_list(cfg, args):
     for agent in cfg["agents"]:
         n = sum(1 for r in running.values() if r.type == agent["type"])
         print(f"agent type={agent['type']} dir={agent['dir']} count={agent['count']} "
-              f"running={n} command={quote(agent['command'])} {trust_fields(cfg, agent)}")
+              f"running={n} command={quote(agent['command'])} {trust_fields(cfg, agent)}"
+              + ("" if Path(agent["dir"]).is_dir() else " dir_missing=yes"))
     for r in running.values():
         screen = tmux(cfg, "capture-pane", "-p", "-t", r.pane_id, check=False).stdout
         waiting = " waiting=trust" if looks_like_trust_prompt(screen) else ""
@@ -572,7 +621,7 @@ def after_edit(cfg, kind, old_count, new_count):
     if not session_running(cfg):
         print("session not running; config updated, run 'hive up'")
         return 0
-    return reconcile(load_config(check_dirs=True))
+    return reconcile(load_config())
 
 
 def resolve_or_die(cfg, target, type_override=None):
@@ -667,6 +716,9 @@ def cmd_spawn(cfg, args):
         if args.env is not None and env != entry["env"]:
             die(f"type '{entry['type']}' has a different env; to use another env in the same "
                 f"directory give a new type: hive spawn {entry['dir']} --type <name> --env ...")
+        if not Path(entry["dir"]).is_dir():
+            die(f"type '{entry['type']}' has dir '{entry['dir']}', which does not exist; "
+                "fix or remove the entry in config.toml")
         ensure_trust(entry["dir"], entry["config_dir"], args.trust)
         old, new = entry["count"], entry["count"] + args.n
         set_count_edit(cfg, entry["type"], new)
@@ -792,12 +844,21 @@ def systemctl(*args, check=True):
     return result
 
 
+def service_exe():
+    """The hive executable for the unit: %h/.local/bin/hive unless installed elsewhere."""
+    found = shutil.which("hive")
+    default = Path.home() / ".local" / "bin" / "hive"
+    if found is None or Path(found).absolute() == default:
+        return "%h/.local/bin/hive"
+    return str(Path(found).absolute())
+
+
 def cmd_install_service(args):
     cfg = load_config()
     after = " ".join(["network-online.target", *cfg["after"]])
     path = unit_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(UNIT_TEMPLATE.format(after=after))
+    path.write_text(UNIT_TEMPLATE.format(after=after, exe=service_exe()))
     print(f"wrote {path}")
     systemctl("daemon-reload")
     if args.enable:
@@ -902,7 +963,9 @@ def main():
         return cmd_install_service(args)
     if args.command == "uninstall-service":
         return cmd_uninstall_service(args)
-    cfg = load_config(check_dirs=args.command in ("up", "restart", "spawn", "stop", "reconcile"))
+    if args.command in ("up", "down", "spawn", "stop", "reconcile", "roots"):
+        hold_lock()
+    cfg = load_config()
     handlers = {"up": cmd_up, "down": cmd_down, "restart": cmd_restart,
                 "status": cmd_status, "attach": cmd_attach, "list": cmd_list,
                 "spawn": cmd_spawn, "stop": cmd_stop, "reconcile": cmd_reconcile,
