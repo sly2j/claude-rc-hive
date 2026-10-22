@@ -226,6 +226,28 @@ def test_monitor_checked_like_bash(qdir):
     assert tool(qdir, "Monitor", command="hive list") == (0, "")
 
 
+@pytest.mark.parametrize("command", [
+    "hive launchers",
+    "hive launchers default x",
+    "hive spawn foo --launcher x",
+])
+def test_launchers_commands_allowed(qdir, command):
+    assert bash(qdir, command) == (0, "")
+
+
+def test_launchers_add_asks(qdir):
+    assert "claude --remote-control {name}" in asked(qdir, 'hive launchers add x "claude --remote-control {name}"')
+    assert asked(qdir, "hive launchers default x") is None
+
+
+def test_ask_user_question_allowed(qdir):
+    assert tool(qdir, "AskUserQuestion", questions=[]) == (0, "")
+
+
+def test_trust_prompt_names_target_after_launcher(qdir):
+    assert "grants workspace trust to foo" in asked(qdir, "hive spawn --launcher x foo --trust")
+
+
 @pytest.mark.parametrize("stdin", ["{not json", "[]", '{"tool_name": "Bash"}'])
 def test_malformed_input_blocks(qdir, stdin):
     code, err = hook(qdir, stdin)

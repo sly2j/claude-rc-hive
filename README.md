@@ -17,7 +17,7 @@ Terms used throughout are defined in [Concepts](#concepts).
 
 ## What it doesn't do
 
-- It does not sandbox or isolate agents. Each pane runs its command as your user, in its directory. `--sandbox NAME` selects a launcher record from `[queen] discover`; it is not an OS sandbox.
+- It does not sandbox or isolate agents. Each pane runs its command as your user, in its directory. `--launcher NAME` (alias `--sandbox`) selects a launcher from `[[launchers]]` or `[queen] discover`; it is not an OS sandbox.
 - It does not manage Claude login, accounts, or the Remote Control connection. The command in each pane does that.
 - It does not know what a command does. An agent type is a directory plus a command; hive types the command into a shell and leaves it there. A command that exits is not restarted (the shell stays).
 - It does not apply a changed `dir` or `command` to panes that are already running.
@@ -28,16 +28,16 @@ Terms used throughout are defined in [Concepts](#concepts).
 
 | Term | Meaning |
 | --- | --- |
-| agent type | One `[[agents]]` entry: a `type` name, a `dir`, a `count` and a `command`. One tmux window per type, named `<prefix>-<type>`. (Called "agent kind" in `hive --help`.) |
+| agent type | One `[[agents]]` entry: a `type` name, a `dir`, a `count` and a `command`. One tmux window per type, named `<type>-<machine>`. (Called "agent kind" in `hive --help`.) |
 | worker, instance | One running copy of an agent type, in one tmux pane. `hive spawn` adds workers, `hive stop` removes them. |
-| pane name | `<prefix>-<type>-<index>` (index from 1), or `<prefix>-queen`. hive stores it in the tmux pane option `@hive_name`, sets it as the pane title, and the default command uses it as the Remote Control session name. |
+| pane name | `<type>-<machine>-<index>` (index from 1), or `hive-queen-<machine>`; `<machine>` is `prefix`. hive stores it in the tmux pane option `@hive_name`, sets it as the pane title, and the default command uses it as the Remote Control session name. |
 | managed / unmanaged pane | A pane with `@hive_name` (or whose title equals a configured pane name, which hive then adopts) is managed. Every other pane in the session is unmanaged and never touched. |
-| queen | A persistent Claude session in window `<prefix>-queen` that runs `hive` commands for you. |
+| queen | A persistent Claude session in window `hive-queen-<machine>` that runs `hive` commands for you. |
 | hive config directory (hive dir) | `${XDG_CONFIG_HOME:-~/.config}/hive`. Holds `config.toml`, the lock file `.lock`, and the queen's directory `queen/`. |
 | search root | A directory listed in `search_roots`. `hive spawn NAME` looks for a directory `NAME` under each one; `hive dirs` lists them. |
 | trust root | The directory whose trust Claude Code records: the git toplevel of an agent's `dir`, else the `dir` itself. |
 | trust file | The `.claude.json` that holds Claude Code's trust answers. See [Workspace trust](#workspace-trust). |
-| sandbox launcher | A wrapper command that runs Claude with its own Claude config dir. `[queen] discover` lists them; `hive spawn --sandbox NAME` uses one. |
+| launcher | A named launch command, often a wrapper that runs Claude with its own Claude config dir. `[[launchers]]` and `[queen] discover` list them; `hive spawn --launcher NAME` uses one. See [Launchers](#launchers). |
 | `config_dir` | The Claude config dir an agent's command uses. hive reads it only to find the trust file and never exports it. |
 
 ## Getting started
@@ -92,13 +92,13 @@ On distributions that follow PEP 668 (for example Debian 13), `pip install --use
 
    It starts the queen, then one pane per worker, and prints a `started <name>` line for each.
 
-4. Accept the queen's trust dialog. On first start Claude Code asks whether to trust the queen's directory, and `hive up` warns `untrusted <prefix>-queen ...`. Attach, accept the dialog in the queen's pane, and detach with the tmux prefix followed by `d` (`Ctrl-b d` by default):
+4. Accept the queen's trust dialog. On first start Claude Code asks whether to trust the queen's directory, and `hive up` warns `untrusted hive-queen-<machine> ...`. Attach, accept the dialog in the queen's pane, and detach with the tmux prefix followed by `d` (`Ctrl-b d` by default):
 
    ```sh
    hive attach
    ```
 
-5. Connect. In the Claude app or on claude.ai, open Remote Control; each agent appears under its pane name, for example `myhost-my-project-1`, and the queen as `myhost-queen` (`myhost` being the short hostname, the default prefix).
+5. Connect. In the Claude app or on claude.ai, open Remote Control; each agent appears under its pane name, for example `my-project-myhost-1`, and the queen as `hive-queen-myhost` (`myhost` being the short hostname, the default prefix).
 
 6. Check state:
 
@@ -121,7 +121,7 @@ The config file is `${XDG_CONFIG_HOME:-~/.config}/hive/config.toml`. Unknown key
 
 | Key | Meaning |
 | --- | --- |
-| `prefix` | Name prefix. Default: short hostname. |
+| `prefix` | Machine part of instance and window names (`[A-Za-z0-9_-]+`). Default: short hostname. |
 | `session` | tmux session name. Default: `<prefix>-agents`. |
 | `tmux_socket` | `tmux -L` server name. Default: `hive`. Set a different one in any test or isolated config, or it talks to your real hive. |
 | `login_shell` | `true` (default): each pane runs `<shell> -l`, so your login profile applies. `false`: panes run tmux's `default-command`. |
@@ -129,13 +129,18 @@ The config file is `${XDG_CONFIG_HOME:-~/.config}/hive/config.toml`. Unknown key
 | `search_roots` | Optional list of directories where `hive spawn NAME` looks for a directory `NAME`, and that `hive dirs` lists. `hive spawn` skips roots that do not exist; `hive dirs` reports them as `root=<path> error=missing`. `hive roots add\|remove PATH` edits it. |
 | `inspect_roots` | Optional list of the only directories `hive inspect-launcher` reads from. Default: `["~/.local/bin", "/usr/local/bin", "/usr/bin", "/bin", "/opt"]`. |
 | `[defaults] command` | Command for every agent type without its own `command`. |
+| `[defaults] launcher` | Optional name of the default launcher for new types: a `[[launchers]]` name or a `[queen] discover` name. Only checked against `[[launchers]]` at load; other names are looked up in discover when used. |
 | `[queen] command` | Optional command for the queen. Default: `[defaults] command`, else `claude -n {name} --remote-control {name} --permission-mode auto`. |
-| `[queen] discover` | Optional shell command that `hive discover` runs; its output is printed as is. `hive spawn --sandbox NAME` also runs it (timeout 60 s) and reads one record per line (see `hive discover`). |
+| `[queen] discover` | Optional shell command that `hive discover` runs; its output is printed as is. `hive spawn --launcher NAME` also runs it (timeout 60 s) and reads one record per line (see `hive discover`). |
 | `[queen] config_dir` | Optional Claude config dir of the queen's command. Only used to find the trust file `<config_dir>/.claude.json`; never exported. |
 | `[queen] env` | Optional inline table, same rules as `[[agents]] env`, for the queen's pane. |
 | `[env]` | Optional `KEY = "value"` strings, exported in every pane before the command. See [Panes and environment](#panes-and-environment). |
 | `[service] after` | Optional list of units added to `After=` in `hive.service`. |
-| `[[agents]] type` | Required, unique, not `queen`; letters, digits, `.`, `_` and `-` only. Window name is `<prefix>-<type>`. |
+| `[[launchers]] name` | Required, unique, `[a-z0-9][a-z0-9-]*`. |
+| `[[launchers]] command` | Required; must contain `{name}` and `--remote-control`. |
+| `[[launchers]] config_dir` | Optional absolute path (`~/` expanded): the Claude config dir the launcher uses; never exported. |
+| `[[launchers]] description` | Optional free text. |
+| `[[agents]] type` | Required, unique, not `queen` or `hive-queen`; letters, digits, `.`, `_` and `-` only. Window name is `<type>-<machine>`, `<machine>` being `prefix`. |
 | `[[agents]] dir` | Required. Each pane starts with `cd <dir>`. If it does not exist, `up`, `restart` and `reconcile` skip that type's panes and start everything else, `hive list` marks the type `dir_missing=yes`, and `spawn` of that type is refused. |
 | `[[agents]] count` | Number of panes, integer >= 0. Default: 1. `0` keeps the entry (dir, command, comments) without panes. |
 | `[[agents]] command` | Optional override of `[defaults] command`. One of the two is required. |
@@ -150,11 +155,13 @@ Validation rules:
 - Commands and `shell` must not be empty.
 - Env names (in `[env]`, `env` tables and `spawn --env`) must match `[A-Za-z_][A-Za-z0-9_]*`. `CLAUDE_CONFIG_DIR` is rejected everywhere, because hive never sets it; use `config_dir`.
 
-Placeholders in commands, replaced by plain text substitution (other braces such as `${VAR}` are untouched): `{name}` = `<prefix>-<type>-<index>` (index starts at 1), `{type}`, `{index}`, `{dir}`, `{prefix}`.
+Placeholders in commands, replaced by plain text substitution (other braces such as `${VAR}` are untouched): `{name}` = `<type>-<machine>-<index>` (`<machine>` is `prefix`; index starts at 1), `{type}`, `{index}`, `{dir}`, `{prefix}`.
 
 ### Applying changes
 
 Run `hive up`: it reconciles a running session, so adding, removing or recounting agents needs no restart. Changes to `dir` or `command` of panes that are already running are not applied; stop and re-spawn them, or `hive restart`. Session-level keys (`prefix`, `session`, `tmux_socket`, `shell`, `login_shell`, and `[env]` for existing panes) also need `hive restart`.
+
+Upgrading from the `<prefix>-<type>-<index>` naming: `hive up` and reconcile adopt those panes without a restart, renaming them in place (the queen from `<prefix>-queen` to `hive-queen-<machine>`). Their Remote Control session keeps its old name until restarted; a remote client bookmarked on `<host>-queen` must switch to `hive-queen-<host>` after the restart.
 
 ## Commands
 
@@ -166,10 +173,13 @@ Run `hive up`: it reconciles a running session, so adding, removing or recountin
 | `hive status` | Prints `session <session>`, then one line per window and one per pane (`pane <index>: <title>  (<command>)`), then `attach: tmux -L <socket> attach -t <session>`. Exit 1 and `not running` if the session is not running. Works with a broken `config.toml`, like `down`. |
 | `hive attach` | Attach to the session (exit 1 if not running). |
 | `hive list` | Config and running state side by side, as `key=value` lines. See [hive list](#hive-list). |
-| `hive spawn TARGET [-n N] [--type TYPE] [--command CMD \| --sandbox NAME] [--config-dir PATH] [--env KEY=VALUE ...] [--trust]` | Add N workers of a type or a new directory, then reconcile. See [hive spawn](#hive-spawn). |
+| `hive spawn TARGET [-n N] [--type TYPE] [--command CMD \| --launcher NAME] [--config-dir PATH] [--env KEY=VALUE ...] [--trust]` | Add N workers of a type or a new directory, then reconcile. See [hive spawn](#hive-spawn). |
 | `hive stop TARGET [-n N]` | Remove N workers (default 1) of an existing type: lower `count`, then reconcile. The highest indices go first; the entry stays at `count = 0`. |
 | `hive reconcile [--dry-run]` | Make the running session match the config: adopt panes titled with a configured pane name (`adopted <name>`), start missing panes, stop managed panes no longer in the config (`stopped <name>`), leave unmanaged panes alone, never stop the queen. Prints `no changes` when there is nothing to do. `--dry-run` only prints `would start <name>`, `would stop <name>` and `would skip <name>: dir <dir> does not exist`. Exit 1 if not running. |
 | `hive discover` | Run `[queen] discover` and print its output verbatim. See [hive discover](#hive-discover). |
+| `hive launchers` | List the known launchers, one `launcher name=N source=config\|discover default=yes\|no config_dir=<path\|default> command=<cmd> [description=...] [shadowed=yes]` record each: the default first, then the registry, then `[queen] discover` records. See Launchers. |
+| `hive launchers add NAME COMMAND [--config-dir PATH] [--description TEXT]` | Append a `[[launchers]]` entry to `config.toml`. NAME matches `[a-z0-9][a-z0-9-]*` and is not already a registry or discover name (exit 2). COMMAND must contain `{name}` and `--remote-control`, and its executable (first word) must exist on `PATH` or as a path (exit 2) and not be under a `secrets`/`private` path (exit 3). hive never runs it. The config is unchanged on any error. The first launcher added becomes `[defaults] launcher` when none is set. |
+| `hive launchers default NAME` | Write `[defaults] launcher = NAME`. NAME is a registry or discover name (exit 2 otherwise). |
 | `hive dirs [ROOT] [--depth N]` | Read-only: list the directories under the search roots. See [hive dirs](#hive-dirs). |
 | `hive roots [add PATH \| remove PATH]` | Show `search_roots`, or add or remove one. See [hive roots](#hive-roots). |
 | `hive inspect-launcher COMMAND` | Read-only: show a launcher's `CLAUDE_CONFIG_DIR` evidence. See [hive inspect-launcher](#hive-inspect-launcher). |
@@ -186,15 +196,15 @@ Config and running state as `key=value` lines, in this order: a header `session=
 
 ### hive spawn
 
-`hive spawn TARGET [-n N] [--type TYPE] [--command CMD | --sandbox NAME] [--config-dir PATH] [--env KEY=VALUE ...] [--trust]`
+`hive spawn TARGET [-n N] [--type TYPE] [--command CMD | --launcher NAME] [--config-dir PATH] [--env KEY=VALUE ...] [--trust]`
 
-Add N workers (default 1): raise `count` of the type TARGET names, or add an `[[agents]]` entry for a directory (absolute, `~/...`, or a name under `search_roots`), then reconcile. Prints `config agent=<type> count=<old>-><new> file=<path>`. `--command` must contain `{name}` and `--remote-control`. `--config-dir` writes `config_dir` into the new entry. `--sandbox NAME` takes `command` and `config_dir` from the `hive discover` record `name=NAME` (error if `[queen] discover` is unset or NAME is unknown) and defaults the type to `<base>-<NAME>`, base being TARGET's type or the directory's basename; it cannot be combined with `--command` or `--config-dir`. For an existing type, a different `command`, `config_dir` or `--env` set is rejected (exit 2, use a new `--type`). `--env` (repeatable) fills the new entry's `env` table. Exits 3 without changes if the directory is untrusted, unless `--trust` is given (see [Workspace trust](#workspace-trust)). If the session is not running, only the config is updated.
+Add N workers (default 1): raise `count` of the type TARGET names, or add an `[[agents]]` entry for a directory (absolute, `~/...`, or a name under `search_roots`), then reconcile. Prints `config agent=<type> count=<old>-><new> file=<path>`. `--command` must contain `{name}` and `--remote-control`. `--config-dir` writes `config_dir` into the new entry. `--launcher NAME` (`--sandbox` is an alias) copies `command` and `config_dir` from the launcher into the new `[[agents]]` entry; NAME is a `[[launchers]]` name or a `hive discover` record `name=NAME` (registry wins; error if unknown, or if `[queen] discover` is unset and NAME is not in the registry). A new type chosen with a launcher is `<base>-<NAME>` unless `--type` is given, base being TARGET's type or the directory's basename. `--launcher` cannot be combined with `--command` or `--config-dir`. Without `--command` or `--launcher`, a new type uses `[defaults] launcher` when set (type suffixed likewise), else `[defaults] command`. An existing type keeps its stored command and only gets a count bump. Spawn exits 2 when the resulting type already exists with a different `command`, `config_dir` or `--env` set (use a new `--type`), and when the final type is reserved (e.g. dir `hive` with launcher `queen`). `--env` (repeatable) fills the new entry's `env` table. Exits 3 without changes if the directory is untrusted, unless `--trust` is given (see [Workspace trust](#workspace-trust)). If the session is not running, only the config is updated.
 
 ### hive discover
 
 `hive discover`
 
-Run `[queen] discover` and print its output verbatim; the exit code is the command's. For `spawn --sandbox`, each line is one record of whitespace-separated `key=value` tokens, values with spaces double-quoted (shlex): `name=api config_dir=~/.claude-api command="claude-supervisor run api -- -n {name} --remote-control {name}"`. `name`, `config_dir` and `command` are required; unknown keys and blank lines are ignored; a bad line is an error naming it.
+Run `[queen] discover` and print its output verbatim; the exit code is the command's. For `spawn --launcher`, each line is one record of whitespace-separated `key=value` tokens, values with spaces double-quoted (shlex): `name=api config_dir=~/.claude-api command="claude-supervisor run api -- -n {name} --remote-control {name}"`. Records are also usable as launcher names. `name`, `config_dir` and `command` are required; unknown keys and blank lines are ignored; a bad line is an error naming it.
 
 ### hive dirs
 
@@ -250,11 +260,11 @@ The reason: `hive down` and `systemctl --user stop hive` must never touch other 
 
 ## Locking
 
-`up`, `down`, `spawn`, `stop`, `reconcile` and `roots` (also when only listing) take a lock on `${XDG_CONFIG_HOME:-~/.config}/hive/.lock`, so the queen and you can run them at the same time. `restart` takes it only when it runs `down` and `up` itself; a restart through systemd takes it in the unit's `hive down` and `hive up`. A command waits up to 30 s for the lock, then exits 1 with `another hive command holds <path>; try again`. `hive down` still runs if the lock file cannot be opened, so systemd's `ExecStop` can always stop the session.
+`up`, `down`, `spawn`, `stop`, `reconcile`, `roots` (also when only listing) and `launchers add|default` take a lock on `${XDG_CONFIG_HOME:-~/.config}/hive/.lock`, so the queen and you can run them at the same time. `restart` takes it only when it runs `down` and `up` itself; a restart through systemd takes it in the unit's `hive down` and `hive up`. A command waits up to 30 s for the lock, then exits 1 with `another hive command holds <path>; try again`. `hive down` still runs if the lock file cannot be opened, so systemd's `ExecStop` can always stop the session.
 
 ## Queen
 
-The queen is a persistent Claude session, window `<prefix>-queen`, always started first. It runs the `hive` commands for you: ask it for "one more X" or "one less X" and it edits `config.toml` through `hive spawn` and `hive stop`, which then reconcile the session. Config stays the single source of truth; the queen is never stopped by reconcile, only by `hive down`.
+The queen is a persistent Claude session, window and Remote Control session `hive-queen-<machine>`, always started first. It runs the `hive` commands for you: ask it for "one more X" or "one less X" and it edits `config.toml` through `hive spawn` and `hive stop`, which then reconcile the session. Config stays the single source of truth; the queen is never stopped by reconcile, only by `hive down`.
 
 With the default `[queen] command` the queen runs with Remote Control on. A custom `[queen] command` without `--remote-control` gets only a warning when the queen starts.
 
@@ -266,7 +276,7 @@ For a spawn with a custom launcher command and no known `config_dir`, the queen 
 
 The queen runs with `--permission-mode auto` by default, so its limits come from the flags hive adds to its command and the files hive manages in its directory:
 
-- The queen's tools are limited to Bash, Monitor, Read, Grep, Glob, Edit, Write and NotebookEdit. hive appends `--tools Bash,Monitor,Read,Grep,Glob,Edit,Write,NotebookEdit --strict-mcp-config` to the queen command unless the command already has those flags, and the guard hook denies every other tool (WebFetch, WebSearch, Agent, MCP tools) with `guard: tool '<name>' is not available to the queen`.
+- The queen's tools are limited to Bash, Monitor, Read, Grep, Glob, Edit, Write, NotebookEdit and AskUserQuestion (for its launcher choice dialogue). hive appends `--tools Bash,Monitor,Read,Grep,Glob,Edit,Write,NotebookEdit,AskUserQuestion --strict-mcp-config` to the queen command unless the command already has those flags, and the guard hook denies every other tool (WebFetch, WebSearch, Agent, MCP tools) with `guard: tool '<name>' is not available to the queen`.
 - `.claude/settings.json` allows `Bash(hive:*)` and denies the Read tool on `~/.ssh`, `~/.claude`, `~/.claude.json`, `~/.gnupg`, `~/.aws`, `.env` files and `secrets`/`private` paths.
 - A PreToolUse guard hook (`.claude/hooks/guard.py`, matcher `*`) checks every tool call. If the hook fails (it crashes, or `python3` is missing), the call is blocked; this needs Claude Code >= 2.1.295, and older versions let the call through.
 - Shell tools (Bash, Monitor): only a single `hive` command is allowed, with no `;`, `&`, `|`, backticks, `$(`, redirects or newlines; path arguments may not use globs or brace expansion or point under a `secrets`/`private` path. No options before the subcommand (`hive -- down` is blocked); only `hive --version`, `-h` and `--help` are allowed there. Anything else is blocked.
@@ -275,19 +285,24 @@ The queen runs with `--permission-mode auto` by default, so its limits come from
   - `hive spawn` with any `--env`, since a variable such as `BASH_ENV` could get around the command check.
   - `hive spawn ... --trust`.
   - `hive roots add PATH`.
+  - `hive launchers add`, since a registered launcher then runs through `spawn --launcher` without a `--command` prompt.
   - `hive down` and `hive restart`, which stop the whole hive, the queen included.
 - A blocked call stays blocked; the prompt never overrides it.
 - File tools: only paths inside the queen's directory, never under a `secrets`/`private` path. Glob and Grep patterns may not contain `..` or a path part that mixes `{` or `[` with `.`. No writes to its `.claude/`, `.mcp.json`, `.claude.json` or `CLAUDE.md`; `CLAUDE.local.md` is writable.
 
 What this does not cover: every other single `hive` command runs without a prompt, including `hive stop`. The workers the queen spawns are ordinary panes and get none of these restrictions.
 
+## Launchers
+
+A launcher is a named launch command, optionally with its own Claude config dir. The registry is the `[[launchers]]` list in `config.toml`; `[defaults] launcher` names the default for new types. `hive launchers` lists the registry plus the `[queen] discover` records. The registry wins on a name in both, and the discover record is then marked `shadowed=yes`. If `discover` is unset it adds nothing; if it fails, the registry is still listed, followed by a `discover error=<reason>` line (exit 0). Use one with `hive spawn --launcher NAME`. Add one with `hive launchers add` and change the default with `hive launchers default`; check the command first with `hive inspect-launcher "CMD"` to infer its `config_dir`. To rename or remove a launcher, edit `config.toml` by hand.
+
 ## Workspace trust
 
 Claude Code stores the answer to its "trust this folder?" dialog in a trust file as `projects["<root>"].hasTrustDialogAccepted = true`. `<root>` is the trust root: the git repo root of the directory (`git rev-parse --show-toplevel`), else the directory itself. hive checks only that exact key. It ignores trust Claude Code would inherit from a trusted parent folder or, in a linked worktree, from the main checkout, so it may ask when Claude would not.
 
-The trust file is `<config_dir>/.claude.json` when the agent type (or `[queen]`) has `config_dir`. Without `config_dir`, it is `$CLAUDE_CONFIG_DIR/.claude.json` if hive's own environment has `CLAUDE_CONFIG_DIR`, else `~/.claude.json`. So the systemd service, a plain shell and the queen can each resolve a different trust file and disagree on whether a directory is trusted. Set `config_dir` to pin it.
+The trust file is `<config_dir>/.claude.json` when the agent type (or `[queen]`) has `config_dir`. Without `config_dir`, it is `$CLAUDE_CONFIG_DIR/.claude.json` if hive's own environment has `CLAUDE_CONFIG_DIR`, else `~/.claude.json`. With `spawn --launcher`, the chosen launcher's `config_dir` is used. So the systemd service, a plain shell and the queen can each resolve a different trust file and disagree on whether a directory is trusted. Set `config_dir` to pin it.
 
-hive never seeds trust silently. `hive spawn` checks the trust root before editing the config; if it is untrusted it prints `untrusted: <dir> (trust root <root>, trust file <file>); rerun with --trust after the user confirms` to stderr and exits 3 without changes. Rerun with `--trust` once you have confirmed: hive sets only that one key, under Claude Code's lock on the file (it refuses a trust file that is not valid JSON), prints `trusted <root> in <file>`, and proceeds.
+hive never seeds trust silently. `hive spawn` checks the trust root (in the chosen launcher's `config_dir`, its `.claude.json`) before editing the config; if it is untrusted it prints `untrusted: <dir> (trust root <root>, trust file <file>); rerun with --trust after the user confirms` to stderr and exits 3 without changes. Rerun with `--trust` once you have confirmed: hive sets only that one key, under Claude Code's lock on the file (it refuses a trust file that is not valid JSON), prints `trusted <root> in <file>`, and proceeds.
 
 `hive up` and `hive reconcile` (also `--dry-run`) warn `untrusted <name> <root>` for each pane they would start in an untrusted root, and still start it. The pane shows the dialog, which you accept via `hive attach`. `hive list` marks such a pane `waiting=trust`.
 

@@ -21,13 +21,13 @@ from importlib import resources
 from importlib.metadata import PackageNotFoundError, version as pkg_version
 from pathlib import Path
 
-from hive.configedit import (ENV_KEY_RE, EditError, append_agent, set_count,
-                             set_search_roots, verify, write_atomic)
+from hive.configedit import (ENV_KEY_RE, EditError, append_agent, append_launcher, set_count,
+                             set_default_launcher, set_search_roots, verify, write_atomic)
 from hive.dirs import MAX_DEPTH, PRIVATE_NAMES, list_dirs
-from hive.inspect import DEFAULT_ROOTS, inspect_launcher
+from hive.inspect import DEFAULT_ROOTS, LauncherError, inspect_launcher, resolve_launcher
 from hive.paths import PathError, expanduser
-from hive.reconcile import (Existing, ResolveError, RunningPane, desired_panes,
-                            parse_records, plan, resolve_target, sandbox_type)
+from hive.reconcile import (RESERVED_TYPES, Existing, New, ResolveError, RunningPane, desired_panes,
+                            parse_records, plan, queen_name, resolve_target, sandbox_type)
 from hive.trust import (TrustError, is_trusted, looks_like_trust_prompt, seed_trust,
                         trust_file, trust_root)
 
@@ -35,13 +35,15 @@ UNIT_NAME = "hive.service"
 
 TOP_KEYS = {"prefix", "session", "tmux_socket", "login_shell", "shell",
             "defaults", "env", "service", "agents", "search_roots", "queen",
-            "inspect_roots"}
+            "inspect_roots", "launchers"}
+LAUNCHER_KEYS = {"name", "command", "config_dir", "description"}
+LAUNCHER_NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]*")
 AGENT_KEYS = {"type", "dir", "count", "command", "env", "config_dir"}
 QUEEN_KEYS = {"command", "discover", "env", "config_dir"}
 # Used when neither [queen] nor [defaults] sets a command.
 DEFAULT_QUEEN_COMMAND = "claude -n {name} --remote-control {name} --permission-mode auto"
 # Tool allowlist for the queen; the guard hook enforces the same set.
-QUEEN_TOOLS = "Bash,Monitor,Read,Grep,Glob,Edit,Write,NotebookEdit"
+QUEEN_TOOLS = "Bash,Monitor,Read,Grep,Glob,Edit,Write,NotebookEdit,AskUserQuestion"
 TYPE_RE = re.compile(r"[A-Za-z0-9._-]+")
 # tmux rewrites or mis-targets names with these.
 BAD_NAME_RE = re.compile(r"[.:\s]")
@@ -287,6 +289,9 @@ def parse_config():
 
     prefix = raw.get("prefix", socket.gethostname().split(".")[0])
     check_name(prefix, "prefix", path)
+    # The machine part of every instance name; keep it to the type characters.
+    if not TYPE_RE.fullmatch(prefix):
+        raise ConfigError(f"{path}: prefix {prefix!r} may only contain letters, digits, '_' and '-'")
     session = raw.get("session", f"{prefix}-agents")
     check_name(session, "session", path)
     tmux_socket = raw.get("tmux_socket", "hive")
@@ -300,10 +305,39 @@ def parse_config():
 
     defaults = raw.get("defaults", {})
     check_type(defaults, dict, "defaults", path)
-    check_keys(defaults, {"command"}, "[defaults]", path)
+    check_keys(defaults, {"command", "launcher"}, "[defaults]", path)
     default_command = defaults.get("command")
     if default_command is not None:
         check_text(default_command, "defaults.command", path)
+    # Not checked against [[launchers]]: it may name a discover record, resolved at use time.
+    default_launcher = defaults.get("launcher")
+    if default_launcher is not None:
+        check_type(default_launcher, str, "defaults.launcher", path)
+
+    raw_launchers = raw.get("launchers", [])
+    check_type(raw_launchers, list, "launchers", path)
+    launchers = []
+    launcher_names = set()
+    for i, entry in enumerate(raw_launchers, 1):
+        where = f"launchers[{i}]"
+        check_type(entry, dict, where, path)
+        check_keys(entry, LAUNCHER_KEYS, where, path)
+        for key in ("name", "command"):
+            if key not in entry:
+                raise ConfigError(f"{path}: {where} is missing required key '{key}'")
+            check_text(entry[key], f"{where}.{key}", path)
+        if not LAUNCHER_NAME_RE.fullmatch(entry["name"]):
+            raise ConfigError(f"{path}: {where}.name '{entry['name']}' must match [a-z0-9][a-z0-9-]*")
+        if entry["name"] in launcher_names:
+            raise ConfigError(f"{path}: duplicate launcher name '{entry['name']}'")
+        launcher_names.add(entry["name"])
+        check_launcher_command(entry["command"], f"{path}: {where}.command")
+        description = entry.get("description")
+        if description is not None:
+            check_type(description, str, f"{where}.description", path)
+        launchers.append({"name": entry["name"], "command": entry["command"],
+                          "config_dir": check_config_dir(entry, where, path),
+                          "description": description})
 
     env = raw.get("env", {})
     check_env(env, "env", path)
@@ -354,8 +388,8 @@ def parse_config():
         kind = entry["type"]
         if not kind:
             raise ConfigError(f"{path}: {where}.type must not be empty")
-        if kind == "queen":
-            raise ConfigError(f"{path}: {where}.type 'queen' is reserved for the hive queen")
+        if kind in RESERVED_TYPES:
+            raise ConfigError(f"{path}: {where}.type '{kind}' is reserved for the hive queen")
         if not TYPE_RE.fullmatch(kind):
             raise ConfigError(f"{path}: {where}.type '{kind}' may only contain letters, digits, "
                               "'.', '_' and '-'")
@@ -396,6 +430,8 @@ def parse_config():
         "queen": {"type": "queen", "dir": str(config_home() / "hive" / "queen"),
                   "command": queen_command_line(queen_command), "env": queen_env, "config_dir": queen_config_dir},
         "discover": discover,
+        "launchers": launchers,
+        "default_launcher": default_launcher,
         "config_path": str(path),
     }
 
@@ -468,7 +504,21 @@ def shell_line(cfg, directory, command, env=None):
 
 
 def parse_name(prefix, name):
-    """Return (type, index) for a hive pane name, or None if it is not one."""
+    """Return (type, index) for a hive pane name, or None if it is not one.
+
+    Names are `hive-queen-<prefix>` and `<type>-<prefix>-<N>`.
+    """
+    if name == queen_name(prefix):
+        return "queen", 1
+    rest, _, index = name.rpartition("-")
+    suffix = "-" + prefix
+    if index.isdigit() and rest.endswith(suffix) and len(rest) > len(suffix):
+        return rest[:-len(suffix)], int(index)
+    return None
+
+
+def parse_legacy_name(prefix, name):
+    """Like parse_name, for the pre-launcher forms `<prefix>-queen`, `<prefix>-<type>-<N>`."""
     if not name.startswith(prefix + "-"):
         return None
     rest = name[len(prefix) + 1:]
@@ -485,6 +535,8 @@ def running_panes(cfg):
 
     A pane is managed when it has @hive_name, or (adopted) when its title equals
     a desired name exactly; everything else is unmanaged and never touched.
+    A pane tagged with a legacy name whose canonical name is desired is adopted
+    under the canonical name (reconcile retags and renames it).
     """
     fmt = "#{pane_id}\t#{window_id}\t#{window_name}\t#{@hive_name}\t#{pane_title}"
     out = tmux(cfg, "list-panes", "-s", "-t", "=" + cfg["session"], "-F", fmt)
@@ -496,6 +548,13 @@ def running_panes(cfg):
         name = hive_name
         if not name and title in desired:
             name, adopted = title, True
+        if name and name not in desired:
+            legacy = parse_legacy_name(cfg["prefix"], name)
+            if legacy:
+                canonical = (queen_name(cfg["prefix"]) if legacy[0] == "queen"
+                             else f"{legacy[0]}-{cfg['prefix']}-{legacy[1]}")
+                if canonical in desired:
+                    name, adopted = canonical, True
         parsed = parse_name(cfg["prefix"], name) if name else None
         if parsed is None:
             unmanaged.append({"pane": pane_id, "window": window_name, "title": title})
@@ -604,9 +663,11 @@ def reconcile(cfg, dry_run=False, announce_idle=True):
     session = cfg["session"]
     if not session_running(cfg):
         die(f"session {session} not running; run 'hive up'", 1)
-    queen_name = f"{cfg['prefix']}-queen"
+    queen = queen_name(cfg["prefix"])
     running, _ = running_panes(cfg)
-    to_start, to_stop = plan(desired_panes(cfg), running, queen_name)
+    wanted = desired_panes(cfg)
+    to_start, to_stop = plan(wanted, running, queen)
+    windows_of = {p.name: p.window for p in wanted}
     adopted = [r for r in running.values() if r.adopted]
     acted = False
 
@@ -614,9 +675,14 @@ def reconcile(cfg, dry_run=False, announce_idle=True):
         # Cheap; panes opened later inherit it.
         for key, value in cfg["env"].items():
             tmux(cfg, "set-environment", "-g", key, os.path.expandvars(value))
-    # Adoption only tags a running pane, so --dry-run does not report it.
+    # Adoption only retags a running pane, so --dry-run does not report it.
     for r in adopted if not dry_run else []:
         tmux(cfg, "set-option", "-p", "-t", r.pane_id, "@hive_name", r.name)
+        tmux(cfg, "select-pane", "-t", r.pane_id, "-T", r.name)
+        # A legacy window (<prefix>-<type>, <prefix>-queen) is renamed so new panes split into it.
+        legacy_window = f"{cfg['prefix']}-{r.type}"
+        if r.window_name == legacy_window != windows_of[r.name]:
+            tmux(cfg, "rename-window", "-t", r.window_id, windows_of[r.name])
         print(f"adopted {r.name}")
         acted = True
 
@@ -624,7 +690,7 @@ def reconcile(cfg, dry_run=False, announce_idle=True):
     skipped = set()
     for pane in to_start:
         acted = True
-        if pane.name != queen_name and not Path(pane.dir).is_dir():
+        if pane.name != queen and not Path(pane.dir).is_dir():
             # One stale entry must not keep the rest of the hive down.
             print(f"{'would skip' if dry_run else 'skipped'} {pane.name}: "
                   f"dir {pane.dir} does not exist", file=sys.stderr)
@@ -635,7 +701,7 @@ def reconcile(cfg, dry_run=False, announce_idle=True):
             print(f"would start {pane.name}")
             continue
         preflight(cfg, pane)
-        if pane.name == queen_name:
+        if pane.name == queen:
             materialize_queen(cfg)
         if windows is None:
             windows = window_ids(cfg)
@@ -751,12 +817,12 @@ def trust_fields(cfg, entry):
 
 
 def cmd_list(cfg, args):
-    queen_name = f"{cfg['prefix']}-queen"
+    queen = queen_name(cfg["prefix"])
     up = session_running(cfg)
     running, unmanaged = running_panes(cfg) if up else ({}, [])
     print(f"session={cfg['session']} socket={cfg['socket']} running={'yes' if up else 'no'} "
           f"config={cfg['config_path']}")
-    print(f"queen name={queen_name} running={'yes' if queen_name in running else 'no'} "
+    print(f"queen name={queen} running={'yes' if queen in running else 'no'} "
           f"dir={cfg['queen']['dir']} {trust_fields(cfg, cfg['queen'])}")
     for agent in cfg["agents"]:
         n = sum(1 for r in running.values() if r.type == agent["type"])
@@ -770,7 +836,7 @@ def cmd_list(cfg, args):
     for u in unmanaged:
         print(f"unmanaged pane={u['pane']} window={u['window']} title={quote(u['title'])}")
     if up:
-        to_start, to_stop = plan(desired_panes(cfg), running, queen_name)
+        to_start, to_stop = plan(desired_panes(cfg), running, queen)
         if to_start or to_stop:
             print(f"drift start={','.join(p.name for p in to_start) or 'none'} "
                   f"stop={','.join(r.name for r in to_stop) or 'none'}")
@@ -833,7 +899,7 @@ def parse_env_args(items):
         if not sep or not ENV_KEY_RE.fullmatch(key):
             die(f"--env '{item}' must be KEY=VALUE with KEY matching {ENV_KEY_RE.pattern}")
         if key == "CLAUDE_CONFIG_DIR":
-            die(f"--env CLAUDE_CONFIG_DIR: {CONFIG_DIR_ENV_MSG} (--config-dir or --sandbox)")
+            die(f"--env CLAUDE_CONFIG_DIR: {CONFIG_DIR_ENV_MSG} (--config-dir or --launcher)")
         env[key] = value
     return env
 
@@ -845,26 +911,69 @@ def expand_config_dir(text, where):
     return str(directory)
 
 
-def sandbox_record(cfg, name):
-    """The `[queen] discover` record with name == `name`."""
-    if not cfg["discover"]:
-        die("--sandbox needs [queen] discover, which is not configured")
+def check_launcher_command(command, where):
+    if not ("{name}" in command and "--remote-control" in command):
+        raise ConfigError(f"{where} must contain {{name}} and --remote-control")
+
+
+def run_discover(cfg):
+    """Run `[queen] discover`: (records, error message, exit code); records is None on error."""
     try:
         out = subprocess.run(cfg["discover"], shell=True, capture_output=True, text=True,
                              timeout=DISCOVER_TIMEOUT)
     except subprocess.TimeoutExpired:
-        die(f"discover command timed out after {DISCOVER_TIMEOUT}s: {cfg['discover']}", 1)
+        return None, f"discover command timed out after {DISCOVER_TIMEOUT}s: {cfg['discover']}", 1
     if out.returncode != 0:
-        die(f"discover command failed (exit {out.returncode}): {out.stderr.strip()}", 1)
+        return None, f"discover command failed (exit {out.returncode}): {out.stderr.strip()}", 1
     try:
-        records = parse_records(out.stdout)
+        return parse_records(out.stdout), None, 0
     except ResolveError as e:
-        die(str(e))
-    for record in records:
-        if record["name"] == name:
-            return record
-    die(f"no sandbox '{name}' in discover output; available: "
-        f"{', '.join(r['name'] for r in records) or 'none'}")
+        return None, str(e), 2
+
+
+def all_launchers(cfg):
+    """(registry records, then discover records; discover error or None). Never raises on discover."""
+    records = [{"name": l["name"], "source": "config", "config_dir": l["config_dir"],
+                "command": l["command"], "description": l["description"], "shadowed": False}
+               for l in cfg["launchers"]]
+    if not cfg["discover"]:
+        return records, None
+    found, error, _ = run_discover(cfg)
+    if error is not None:
+        return records, error
+    registry = {r["name"] for r in records}
+    for r in found:
+        records.append({"name": r["name"], "source": "discover", "config_dir": r["config_dir"] or None,
+                        "command": r["command"], "description": r.get("description"),
+                        "shadowed": r["name"] in registry})
+    return records, None
+
+
+def launcher_record(cfg, name):
+    """The launcher called `name`: the registry first, then the `[queen] discover` records."""
+    for l in cfg["launchers"]:
+        if l["name"] == name:
+            return {"name": name, "command": l["command"], "config_dir": l["config_dir"]}
+    known = [l["name"] for l in cfg["launchers"]]
+    if cfg["discover"]:
+        records, error, code = run_discover(cfg)
+        if error is not None:
+            die(error, code)
+        for record in records:
+            if record["name"] == name:
+                return {**record, "config_dir": record["config_dir"] or None}
+        known += [r["name"] for r in records if r["name"] not in known]
+    die(f"no launcher '{name}'; available: {', '.join(known) or 'none'}", 2)
+
+
+def check_launcher_type(cfg, type_name, command, config_dir):
+    """Refuse a launcher whose suffixed type is already taken by a different command or config dir."""
+    for entry in cfg["agents"]:
+        if entry["type"] == type_name and (entry["command"] != command
+                                           or entry["config_dir"] != config_dir):
+            die(f"type '{type_name}' already exists for '{entry['dir']}' and runs "
+                f"'{entry['command']}'; the launcher's command differs. Give --type <name> "
+                "to start it under another type")
 
 
 def ensure_trust(directory, config_dir, seed):
@@ -883,25 +992,44 @@ def ensure_trust(directory, config_dir, seed):
     print(f"trusted {root} in {path}")
 
 
+def expand_dir_or_none(config_dir):
+    return expand_config_dir(config_dir, "config_dir") if config_dir is not None else None
+
+
 def cmd_spawn(cfg, args):
     command, config_dir, type_name = args.agent_command, args.config_dir, args.type
-    if args.sandbox is not None:
+    record = None
+    if args.launcher is not None:
         if command is not None or config_dir is not None:
-            die("--sandbox takes command and config_dir from discover; "
+            die("--launcher takes command and config_dir from the launcher; "
                 "do not combine it with --command or --config-dir")
-        record = getattr(args, "sandbox_record", None) or sandbox_record(cfg, args.sandbox)
+        record = getattr(args, "launcher_record", None) or launcher_record(cfg, args.launcher)
         command, config_dir = record["command"], record["config_dir"]
         if type_name is None:
             try:
-                type_name = sandbox_type(cfg, args.target, args.sandbox)
+                type_name = sandbox_type(cfg, args.target, args.launcher)
             except ResolveError as e:
                 die(str(e))
-    if command is not None and not ("{name}" in command and "--remote-control" in command):
-        die("--command must contain {name} and --remote-control")
-    expanded_dir = (expand_config_dir(config_dir, "config_dir") if config_dir is not None
-                    else None)
+        check_launcher_type(cfg, type_name, command, expand_dir_or_none(config_dir))
+    if command is not None:
+        check_launcher_command(command, "--command")
+    expanded_dir = expand_dir_or_none(config_dir)
     env = parse_env_args(args.env)
     target = resolve_or_die(cfg, args.target, type_name)
+    if (isinstance(target, New) and record is None and command is None and config_dir is None
+            and cfg["default_launcher"]):
+        # A new type with no command given runs the default launcher, named after it.
+        record = launcher_record(cfg, cfg["default_launcher"])
+        command, config_dir = record["command"], record["config_dir"]
+        check_launcher_command(command, f"launcher '{record['name']}' command")
+        expanded_dir = expand_dir_or_none(config_dir)
+        if type_name is None:
+            try:
+                type_name = sandbox_type(cfg, args.target, record["name"])
+            except ResolveError as e:
+                die(str(e))
+        check_launcher_type(cfg, type_name, command, expanded_dir)
+        target = resolve_or_die(cfg, args.target, type_name)
     if isinstance(target, Existing):
         entry = target.entry
         if command is not None and command != entry["command"]:
@@ -925,10 +1053,10 @@ def cmd_spawn(cfg, args):
         return after_edit(cfg, entry["type"], old, new)
 
     # The type ends up unquoted in names and commands; keep it to safe characters.
-    if target.type == "queen" or not TYPE_RE.fullmatch(target.type):
+    if target.type in RESERVED_TYPES or not TYPE_RE.fullmatch(target.type):
         suggestion = re.sub(r"[^A-Za-z0-9._-]+", "-", target.type).strip("-") or "agent"
-        if suggestion == "queen":
-            suggestion = "queen-agent"
+        if suggestion in RESERVED_TYPES:
+            suggestion = f"{suggestion}-agent"
         die(f"'{target.type}' is not a usable agent type for '{target.dir}'; "
             "give --type with letters, digits, '.', '_' or '-', e.g. "
             f"--type {suggestion}")
@@ -1014,6 +1142,86 @@ def cmd_roots(cfg, args):
     edit_config(cfg, lambda text: set_search_roots(text, [*raw, spelling]),
                 lambda doc: doc.setdefault("search_roots", []).append(spelling))
     print(f"added {spelling}")
+    return 0
+
+
+def cmd_launchers(cfg, args):
+    action = getattr(args, "launchers_action", None) or "list"
+    return {"list": launchers_list, "add": launchers_add, "default": launchers_default}[action](cfg, args)
+
+
+def launchers_add(cfg, args):
+    name = args.name
+    if not LAUNCHER_NAME_RE.fullmatch(name):
+        die(f"launcher name '{name}' must match {LAUNCHER_NAME_RE.pattern}", 2)
+    records, error = all_launchers(cfg)
+    if error is not None:
+        print(f"warning: discover failed, collisions with its records are not checked: {error}",
+              file=sys.stderr)
+    if any(r["name"] == name for r in records):
+        die(f"launcher '{name}' already exists; names must be unique across the registry and discover", 2)
+    check_launcher_command(args.launch_command, "COMMAND")
+    try:
+        resolve_launcher(args.launch_command)
+    except LauncherError as e:
+        label = "refused" if e.code == 3 else "not found"
+        print(f"{label}: {e}", file=sys.stderr)
+        return e.code
+    config_dir = (expand_config_dir(args.config_dir, "--config-dir")
+                  if args.config_dir is not None else None)
+    first = cfg["default_launcher"] is None
+
+    def edit(text):
+        text = append_launcher(text, name, args.launch_command, config_dir, args.description)
+        return set_default_launcher(text, name) if first else text
+
+    def mutate(doc):
+        launcher = {"name": name, "command": args.launch_command}
+        if config_dir is not None:
+            launcher["config_dir"] = config_dir
+        if args.description is not None:
+            launcher["description"] = args.description
+        doc.setdefault("launchers", []).append(launcher)
+        if first:
+            doc.setdefault("defaults", {})["launcher"] = name
+
+    edit_config(cfg, edit, mutate)
+    print(f"launcher added name={quote(name)} default={'yes' if first else 'no'} file={cfg['config_path']}")
+    return 0
+
+
+def launchers_default(cfg, args):
+    records, error = all_launchers(cfg)
+    names = list(dict.fromkeys(r["name"] for r in records))
+    if args.name not in names:
+        if error is not None:
+            print(f"warning: discover failed: {error}", file=sys.stderr)
+        die(f"no launcher '{args.name}'; available: {', '.join(names) or 'none'}", 2)
+    edit_config(cfg, lambda text: set_default_launcher(text, args.name),
+                lambda doc: doc.setdefault("defaults", {}).__setitem__("launcher", args.name))
+    print(f"default launcher={quote(args.name)} file={cfg['config_path']}")
+    return 0
+
+
+def launchers_list(cfg, args):
+    records, error = all_launchers(cfg)
+    default = cfg["default_launcher"]
+
+    def is_default(r):
+        return r["name"] == default and not r["shadowed"]
+
+    # Stable sort: the default first, then registry, then discover, each in source order.
+    for r in sorted(records, key=lambda r: not is_default(r)):
+        line = (f"launcher name={quote(r['name'])} source={r['source']} "
+                f"default={'yes' if is_default(r) else 'no'} "
+                f"config_dir={quote(r['config_dir'] or 'default')} command={quote(r['command'])}")
+        if r["description"]:
+            line += f" description={quote(r['description'])}"
+        if r["shadowed"]:
+            line += " shadowed=yes"
+        print(line)
+    if error is not None:
+        print(f"discover error={quote(error)}")
     return 0
 
 
@@ -1192,14 +1400,15 @@ def build_parser():
     p.add_argument("target", metavar="TARGET",
                    help="agent type, or a directory (absolute, ~/..., or a name under search_roots)")
     p.add_argument("-n", type=positive_int, default=1, help="number of workers to add (default 1)")
-    p.add_argument("--type", help="agent type name for a new entry (default: directory name; "
-                   "letters, digits, '.', '_' and '-' only)")
+    p.add_argument("--type", help="agent type name for a new entry (default: directory name, plus "
+                   "-<launcher> when a launcher is chosen; letters, digits, '.', '_' and '-' only)")
     p.add_argument("--command", dest="agent_command", metavar="CMD",
                    help="command template; must contain {name} and --remote-control")
     p.add_argument("--config-dir", dest="config_dir", metavar="PATH",
                    help="Claude config dir the command uses; only locates the trust file")
-    p.add_argument("--sandbox", metavar="NAME",
-                   help="take command and config_dir from the [queen] discover record NAME")
+    p.add_argument("--launcher", "--sandbox", dest="launcher", metavar="NAME",
+                   help="take command and config_dir from launcher NAME (registry, then "
+                        "[queen] discover); --sandbox is an alias")
     p.add_argument("--env", action="append", metavar="KEY=VALUE",
                    help="env for a new type, exported after [env] (repeatable)")
     p.add_argument("--trust", action="store_true",
@@ -1211,6 +1420,16 @@ def build_parser():
                        description="Start missing panes, stop surplus ones and adopt panes "
                        "titled with a desired name, so the running session matches the config.")
     p.add_argument("--dry-run", action="store_true", help="only print what would change")
+    p = sub.add_parser("launchers", help="list the launcher registry and discover records")
+    launchers_sub = p.add_subparsers(dest="launchers_action")
+    launchers_sub.add_parser("list", help="list launchers (default action)")
+    lp = launchers_sub.add_parser("add", help="register a launcher in config.toml (never runs it)")
+    lp.add_argument("name", metavar="NAME")
+    lp.add_argument("launch_command", metavar="COMMAND", help="the full launch command, as one argument")
+    lp.add_argument("--config-dir", metavar="PATH", help="CLAUDE_CONFIG_DIR the launcher uses")
+    lp.add_argument("--description", metavar="TEXT")
+    lp = launchers_sub.add_parser("default", help="set the default launcher (edits config)")
+    lp.add_argument("name", metavar="NAME")
     sub.add_parser("discover", help="run [queen] discover and print its output")
     p = sub.add_parser("dirs", help="read-only: list directories under search_roots")
     p.add_argument("root", metavar="ROOT", nargs="?",
@@ -1254,11 +1473,12 @@ def run():
             warn(f"config problem: {problem}")
     else:
         cfg = load_config()
-    if args.command in LOCKED:
-        if (args.command == "spawn" and args.sandbox is not None
+    if args.command in LOCKED or (args.command == "launchers"
+                                  and getattr(args, "launchers_action", None) in ("add", "default")):
+        if (args.command == "spawn" and args.launcher is not None
                 and args.agent_command is None and args.config_dir is None):
             # discover may be slow: run it before taking the lock.
-            args.sandbox_record = sandbox_record(cfg, args.sandbox)
+            args.launcher_record = launcher_record(cfg, args.launcher)
         hold_lock(required=args.command != "down")
         if args.command != "down":
             cfg = load_config()  # fresh copy: another command may have edited it meanwhile
@@ -1266,7 +1486,7 @@ def run():
                 "status": cmd_status, "attach": cmd_attach, "list": cmd_list,
                 "spawn": cmd_spawn, "stop": cmd_stop, "reconcile": cmd_reconcile,
                 "discover": cmd_discover, "inspect-launcher": cmd_inspect_launcher,
-                "dirs": cmd_dirs, "roots": cmd_roots}
+                "dirs": cmd_dirs, "roots": cmd_roots, "launchers": cmd_launchers}
     return handlers[args.command](cfg, args)
 
 

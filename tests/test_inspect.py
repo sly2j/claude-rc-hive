@@ -4,7 +4,8 @@ import os
 import pytest
 
 from hive import cli
-from hive.inspect import inspect_launcher
+from hive.inspect import (LauncherNotFound, LauncherRefused, inspect_launcher,
+                          resolve_launcher)
 
 
 def run(command, roots, environ=None):
@@ -124,3 +125,27 @@ def test_unreadable_script_is_reported(bindir):
 def test_unknown_user_command_not_found(bindir):
     code, out, err = run("~nosuchuser_hive/x", [bindir])
     assert code == 2 and "unknown user" in err
+
+
+def test_resolve_launcher_via_path(bindir):
+    launcher = script(bindir / "claude", "exec true\n")
+    assert resolve_launcher("claude -n x", {"PATH": str(bindir)}) == launcher
+
+
+def test_resolve_launcher_not_found(bindir):
+    with pytest.raises(LauncherNotFound) as e:
+        resolve_launcher("nosuchlauncher", {"PATH": str(bindir)})
+    assert e.value.code == 2 and str(e.value) == "nosuchlauncher"
+
+
+def test_resolve_launcher_private_refused(bindir):
+    launcher = script(bindir / "secrets" / "run", "exec true\n")
+    with pytest.raises(LauncherRefused) as e:
+        resolve_launcher(str(launcher), {})
+    assert e.value.code == 3 and "secrets/private" in str(e.value)
+
+
+def test_resolve_launcher_symlink_outside_roots_accepted(tmp_path, bindir):
+    target = script(tmp_path / "elsewhere" / "real", "exec true\n")
+    (bindir / "claude").symlink_to(target)
+    assert resolve_launcher("claude", {"PATH": str(bindir)}) == bindir / "claude"

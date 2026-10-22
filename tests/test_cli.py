@@ -323,7 +323,7 @@ def test_discover_times_out(env, monkeypatch, capsys):
 
 def test_sandbox_discover_runs_before_the_lock(env, monkeypatch, capsys):
     order = []
-    monkeypatch.setattr(cli, "sandbox_record", lambda cfg, name: order.append("discover"))
+    monkeypatch.setattr(cli, "launcher_record", lambda cfg, name: order.append("discover"))
     monkeypatch.setattr(cli, "hold_lock", lambda **_: order.append("lock"))
     monkeypatch.setattr(cli, "cmd_spawn", lambda cfg, args: 0)
     env.cfg.write_text(BASE + '\n[queen]\ndiscover = "true"\n')

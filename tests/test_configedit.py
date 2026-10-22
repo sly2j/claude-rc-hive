@@ -1,12 +1,14 @@
 import difflib
 import os
 import stat
+import tomllib
 from pathlib import Path
 
 import pytest
 
 from hive import configedit
-from hive.configedit import EditError, append_agent, set_count, verify, write_atomic
+from hive.configedit import (EditError, append_agent, append_launcher, set_count,
+                             set_default_launcher, verify, write_atomic)
 
 EXAMPLE = (Path(configedit.__file__).parent / "config.example.toml").read_text()
 # The example ships without agents; this is it after two spawns and some hand edits.
@@ -280,3 +282,39 @@ def test_verify_refusal_explains_limit():
     msg = str(e.value)
     assert "left unchanged" in msg and "multi-line string" in msg
     assert "edit config.toml by hand" in msg
+
+
+def test_append_launcher_roundtrip():
+    new = append_launcher(EXAMPLE, "sbx", "c -n {name} --remote-control {name}", "~/.cc", "sandboxed")
+    assert new.startswith(EXAMPLE)
+    assert changes(EXAMPLE, new) == [
+        "+", "+[[launchers]]", '+name = "sbx"', '+command = "c -n {name} --remote-control {name}"',
+        '+config_dir = "~/.cc"', '+description = "sandboxed"',
+    ]
+    assert tomllib.loads(new)["launchers"][0]["name"] == "sbx"
+    assert append_launcher("", "a", "c")  == '[[launchers]]\nname = "a"\ncommand = "c"\n'
+
+
+DEFAULTS = '[defaults]\ncommand = "c"\nlauncher = "old"   # keep\n\n[service]\nafter = []\n'
+
+
+def test_set_default_launcher_replace():
+    new = set_default_launcher(DEFAULTS, "new")
+    assert changes(DEFAULTS, new) == ['-launcher = "old"   # keep', '+launcher = "new"   # keep']
+
+
+def test_set_default_launcher_insert():
+    text = '[defaults]  # d\ncommand = "c"\n\n[queen]\nlauncher = "q"\n'
+    new = set_default_launcher(text, "x")
+    assert new == '[defaults]  # d\nlauncher = "x"\ncommand = "c"\n\n[queen]\nlauncher = "q"\n'
+
+
+def test_set_default_launcher_no_table():
+    assert set_default_launcher('shell = "/bin/sh"', "x") == 'shell = "/bin/sh"\n\n[defaults]\nlauncher = "x"\n'
+    assert set_default_launcher("", "x") == '[defaults]\nlauncher = "x"\n'
+
+
+def test_set_default_launcher_ignores_comment():
+    new = set_default_launcher(EXAMPLE, "x")
+    assert changes(EXAMPLE, new) == ['+launcher = "x"']
+    assert tomllib.loads(new)["defaults"]["launcher"] == "x"

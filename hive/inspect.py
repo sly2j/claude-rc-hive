@@ -43,42 +43,72 @@ def root_paths(roots):
     return out
 
 
-def inspect_launcher(command, roots, out, err, environ=os.environ):
-    """Print what COMMAND's launcher reveals about CLAUDE_CONFIG_DIR. Returns the exit code."""
+class LauncherError(Exception):
+    """A launcher command that cannot be resolved. str(e) is the message without a prefix."""
+    code = 1
+
+
+class LauncherNotFound(LauncherError):
+    code = 2
+
+
+class LauncherRefused(LauncherError):
+    code = 3
+
+
+def locate_launcher(command, environ=os.environ):
+    """Return (path, resolved, shown) for COMMAND's token 0, without executing it."""
     try:
         tokens = shlex.split(command)
     except ValueError as e:
-        print(f"not found: cannot parse command: {e}", file=err)
-        return 2
+        raise LauncherNotFound(f"cannot parse command: {e}")
     if not tokens:
-        print("not found: empty command", file=err)
-        return 2
+        raise LauncherNotFound("empty command")
     token = tokens[0]
     if "/" in token:
         try:
             found = expanduser(token)
         except PathError as e:
-            print(f"not found: {e}", file=err)
-            return 2
+            raise LauncherNotFound(str(e)) from None
     else:
         which = shutil.which(token, path=environ.get("PATH"))
         found = Path(which) if which else None
     if found is None or not found.exists():
-        print(f"not found: {token}", file=err)
-        return 2
+        raise LauncherNotFound(token)
 
     path = Path(os.path.normpath(found.absolute()))
     resolved = found.resolve()
     shown = str(path) if path == resolved else f"{path} -> {resolved}"
     if is_private(path) or is_private(resolved):
-        print(f"refused: {shown} is under a secrets/private path", file=err)
+        raise LauncherRefused(f"{shown} is under a secrets/private path")
+    return path, resolved, shown
+
+
+def resolve_launcher(command, environ=os.environ):
+    """Resolve COMMAND's token 0 (PATH lookup or path) to an absolute path, never executing it.
+
+    Raises LauncherNotFound (exit 2) or LauncherRefused for secrets/private paths (exit 3).
+    No inspect_roots check: a plain `claude` symlink may point anywhere.
+    """
+    return locate_launcher(command, environ)[0]
+
+
+def inspect_launcher(command, roots, out, err, environ=os.environ):
+    """Print what COMMAND's launcher reveals about CLAUDE_CONFIG_DIR. Returns the exit code."""
+    try:
+        path, resolved, shown = locate_launcher(command, environ)
+    except LauncherNotFound as e:
+        print(f"not found: {e}", file=err)
+        return 2
+    except LauncherRefused as e:
+        print(f"refused: {e}", file=err)
         return 3
     allowed = root_paths(roots)
     if not (inside(resolved, allowed) and inside(path, allowed)):
         print(f"refused: {shown} is outside inspect_roots ({','.join(roots)})", file=err)
         return 3
     if not resolved.is_file():
-        print(f"not found: {token} (not a regular file)", file=err)
+        print(f"not found: {shlex.split(command)[0]} (not a regular file)", file=err)
         return 2
 
     record = f"path={shlex.quote(str(path))} resolved={shlex.quote(str(resolved))}"
@@ -88,7 +118,7 @@ def inspect_launcher(command, roots, out, err, environ=os.environ):
             binary = b"\0" in head or not head.startswith(b"#!")
             data = b"" if binary else head + f.read(MAX_BYTES + 1 - HEAD_BYTES)
     except OSError as e:
-        print(f"not found: {token} (unreadable: {e.strerror or e})", file=err)
+        print(f"not found: {shlex.split(command)[0]} (unreadable: {e.strerror or e})", file=err)
         return 2
     if binary:
         print(f"{record} kind=binary", file=out)

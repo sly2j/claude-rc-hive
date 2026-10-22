@@ -6,11 +6,12 @@ and Monitor: only a single `hive ...` command, no chaining, redirection or subst
 argument under a secrets/private path. Of those, `hive spawn --command X` (also `--command=X`
 and argparse abbreviations such as `--comm`) runs without a prompt only when X is a command
 string from ../config.toml ([defaults] command or an [[agents]] command). For any other
---command, for any spawn `--env` or `--trust` (same abbreviations), for `hive roots add PATH`
-and for `hive down`/`restart`, the guard answers "ask" so the user confirms (`hive stop` needs no
+--command, for any spawn `--env` or `--trust` (same abbreviations), for `hive roots add PATH`,
+for `hive launchers add` and for `hive down`/`restart`, the guard answers "ask" so the user confirms (`hive stop` needs no
 prompt). Read, Grep, Glob, Edit, Write, NotebookEdit: only paths inside the queen dir
 ($CLAUDE_PROJECT_DIR), never under a secrets/private path, no `..` in glob patterns, and no
-writes into its .claude dir, .mcp.json, .claude.json or CLAUDE.md. Exit 2 blocks the tool call
+writes into its .claude dir, .mcp.json, .claude.json or CLAUDE.md. AskUserQuestion is allowed
+as is. Exit 2 blocks the tool call
 (deny wins over ask); "ask" is JSON on stdout with exit 0; any error blocks (fail closed).
 """
 
@@ -27,7 +28,9 @@ FILE_TOOLS = {"Read", "Grep", "Glob", "Edit", "Write", "NotebookEdit"}
 SHELL_TOOLS = {"Bash", "Monitor"}
 WRITE_TOOLS = {"Edit", "Write", "NotebookEdit"}
 GLOB_CHARS = set("*?[{")
-QUEEN_TOOLS = {"Bash", "Monitor", "Read", "Grep", "Glob", "Edit", "Write", "NotebookEdit"}
+# Asks the user a question; no input the guard needs to check.
+DIALOG_TOOLS = {"AskUserQuestion"}
+QUEEN_TOOLS = {"Bash", "Monitor", "Read", "Grep", "Glob", "Edit", "Write", "NotebookEdit"} | DIALOG_TOOLS
 PROTECTED_NAMES = (".claude", ".mcp.json", ".claude.json", "CLAUDE.md")
 PRIVATE_PARTS = {"secrets", "private"}
 
@@ -82,7 +85,7 @@ def has_flag(args, flag):
     return False
 
 
-SPAWN_VALUE_OPTIONS = ("--type", "--command", "--config-dir", "--sandbox", "--env")
+SPAWN_VALUE_OPTIONS = ("--type", "--command", "--config-dir", "--launcher", "--sandbox", "--env")
 
 
 def spawn_target(args):
@@ -161,6 +164,10 @@ def check_bash(command, qdir):
             "approve to run it")
     if len(tokens) > 2 and tokens[1] == "roots" and tokens[2] == "add":
         ask(f"hive roots add changes the search roots: {' '.join(tokens[3:])}; approve to run it")
+    if len(tokens) > 2 and tokens[1] == "launchers" and tokens[2] == "add":
+        # A registered launcher later runs through `spawn --launcher` without a --command prompt.
+        ask(f"hive launchers add registers a launch command: {' '.join(tokens[3:])}; "
+            "approve to run it")
 
 
 def check_path(text, qdir, write):
@@ -227,6 +234,8 @@ def main():
         if not isinstance(tool_input, dict):
             block("guard: tool_input is not an object")
         qdir = Path(os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()).resolve()
+        if tool in DIALOG_TOOLS:
+            return 0
         if tool in SHELL_TOOLS:
             check_bash(tool_input.get("command"), qdir)
         else:

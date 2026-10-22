@@ -33,15 +33,19 @@ class RunningPane:
     adopted: bool
 
 
+def queen_name(prefix):
+    return f"hive-queen-{prefix}"
+
+
 def desired_panes(cfg):
     """The queen first, then each agent type in config order, indices 1..count."""
     prefix = cfg["prefix"]
     queen = cfg["queen"]
-    name = f"{prefix}-queen"
+    name = queen_name(prefix)
     panes = [Pane(name, name, "queen", 1, queen["dir"], queen["command"],
                   queen.get("env", {}), queen.get("config_dir"))]
     for agent in cfg["agents"]:
-        window = f"{prefix}-{agent['type']}"
+        window = f"{agent['type']}-{prefix}"
         for i in range(1, agent["count"] + 1):
             panes.append(Pane(f"{window}-{i}", window, agent["type"], i,
                               agent["dir"], agent["command"], agent.get("env", {}),
@@ -75,6 +79,7 @@ class New:
     stored_dir: str  # what to write to the config: as typed if it starts with "~"
 
 
+RESERVED_TYPES = ("queen", "hive-queen")
 QUEEN_ERROR = "the queen is always running; use 'hive down' to stop the whole hive"
 
 
@@ -128,7 +133,7 @@ def _target_dir(cfg, target):
 
 def sandbox_type(cfg, target, sandbox):
     """Default type for --sandbox: TARGET's type, else its directory name, plus -<sandbox>."""
-    if target == "queen":
+    if target in RESERVED_TYPES:
         raise ResolveError(QUEEN_ERROR)
     entry = _entry(cfg, target)
     base = entry["type"] if entry else Path(_target_dir(cfg, target)[0]).name
@@ -167,7 +172,7 @@ def parse_records(text):
 
 def resolve_target(cfg, target, type_override=None):
     """Map a spawn/stop TARGET to Existing(entry) or New(type, dir, stored_dir)."""
-    if target == "queen" or type_override == "queen":
+    if target in RESERVED_TYPES or type_override in RESERVED_TYPES:
         raise ResolveError(QUEEN_ERROR)
 
     if type_override:

@@ -16,8 +16,8 @@ def make_cfg(agents, roots=(), prefix="swarm"):
 
 
 def running(window, i, prefix="swarm"):
-    name = f"{prefix}-{window}-{i}"
-    return RunningPane(f"%{i}", "@1", f"{prefix}-{window}", name, window, i, False)
+    name = f"{window}-{prefix}-{i}"
+    return RunningPane(f"%{i}", "@1", f"{window}-{prefix}", name, window, i, False)
 
 
 # desired_panes / plan
@@ -26,38 +26,38 @@ def test_desired_panes_order_and_counts():
     cfg = make_cfg([("a", "/a", 2), ("b", "/b", 0), ("c", "/c", 1)])
     panes = desired_panes(cfg)
     assert [p.name for p in panes] == [
-        "swarm-queen", "swarm-a-1", "swarm-a-2", "swarm-c-1"]
-    assert panes[0] == Pane("swarm-queen", "swarm-queen", "queen", 1, "/q", "claude {name}")
-    assert panes[2] == Pane("swarm-a-2", "swarm-a", "a", 2, "/a", "run {name}")
+        "hive-queen-swarm", "a-swarm-1", "a-swarm-2", "c-swarm-1"]
+    assert panes[0] == Pane("hive-queen-swarm", "hive-queen-swarm", "queen", 1, "/q", "claude {name}")
+    assert panes[2] == Pane("a-swarm-2", "a-swarm", "a", 2, "/a", "run {name}")
 
 
 def test_desired_panes_all_zero_is_queen_only():
-    assert [p.name for p in desired_panes(make_cfg([("a", "/a", 0)]))] == ["swarm-queen"]
+    assert [p.name for p in desired_panes(make_cfg([("a", "/a", 0)]))] == ["hive-queen-swarm"]
 
 
 def test_plan_starts_missing_middle_indices_in_order():
     desired = desired_panes(make_cfg([("a", "/a", 3), ("b", "/b", 1)]))
-    queen = RunningPane("%0", "@0", "swarm-queen", "swarm-queen", "queen", 1, False)
+    queen = RunningPane("%0", "@0", "hive-queen-swarm", "hive-queen-swarm", "queen", 1, False)
     run = {r.name: r for r in (queen, running("a", 1), running("a", 3))}
-    to_start, to_stop = plan(desired, run, "swarm-queen")
-    assert [p.name for p in to_start] == ["swarm-a-2", "swarm-b-1"]
+    to_start, to_stop = plan(desired, run, "hive-queen-swarm")
+    assert [p.name for p in to_start] == ["a-swarm-2", "b-swarm-1"]
     assert to_stop == []
 
 
 def test_plan_stops_highest_index_first_and_never_the_queen():
     desired = desired_panes(make_cfg([("a", "/a", 1)]))
     panes = [running("a", i) for i in (1, 2, 3, 4)] + [running("b", 1), running("b", 2)]
-    queen = RunningPane("%0", "@0", "swarm-queen", "swarm-queen", "queen", 1, False)
+    queen = RunningPane("%0", "@0", "hive-queen-swarm", "hive-queen-swarm", "queen", 1, False)
     run = {r.name: r for r in panes + [queen]}
-    to_start, to_stop = plan(desired, run, "swarm-queen")
+    to_start, to_stop = plan(desired, run, "hive-queen-swarm")
     assert to_start == []
     assert [r.name for r in to_stop] == [
-        "swarm-a-4", "swarm-a-3", "swarm-a-2", "swarm-b-2", "swarm-b-1"]
+        "a-swarm-4", "a-swarm-3", "a-swarm-2", "b-swarm-2", "b-swarm-1"]
 
 
 def test_plan_queen_not_stopped_even_if_not_desired():
-    queen = RunningPane("%0", "@0", "swarm-queen", "swarm-queen", "queen", 1, False)
-    to_start, to_stop = plan([], {"swarm-queen": queen}, "swarm-queen")
+    queen = RunningPane("%0", "@0", "hive-queen-swarm", "hive-queen-swarm", "queen", 1, False)
+    to_start, to_stop = plan([], {"hive-queen-swarm": queen}, "hive-queen-swarm")
     assert to_start == [] and to_stop == []
 
 
@@ -245,3 +245,13 @@ def test_unknown_user_in_target_is_resolve_error():
     cfg = make_cfg([])
     with pytest.raises(ResolveError, match="unknown user"):
         resolve_target(cfg, "~nosuchuser_hive/x")
+
+
+def test_reserved_hive_queen_type_rejected(dirs):
+    cfg = make_cfg([("a", "/a", 1)])
+    with pytest.raises(ResolveError, match="queen is always running"):
+        resolve_target(cfg, "hive-queen")
+    with pytest.raises(ResolveError, match="queen is always running"):
+        resolve_target(cfg, "/x", "hive-queen")
+    with pytest.raises(ResolveError, match="queen is always running"):
+        sandbox_type(cfg, "hive-queen", "x")

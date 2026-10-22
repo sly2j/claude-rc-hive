@@ -1,3 +1,5 @@
+import sys
+
 import pytest
 
 from hive import cli
@@ -178,7 +180,8 @@ def test_init_writes_a_config_that_up_accepts(tmp_path, monkeypatch, capsys):
     cfg = cli.load_config()
     assert cfg["agents"] == []
     assert cfg["queen"]["command"] == cli.DEFAULT_QUEEN_COMMAND + QUEEN_FLAGS
-    assert [p.name for p in cli.desired_panes(cfg)] == [f"{cfg['prefix']}-queen"]
+    assert [p.name for p in cli.desired_panes(cfg)] == [f"hive-queen-{cfg['prefix']}"]
+    assert cfg["launchers"] == [] and cfg["default_launcher"] is None
 
 
 def test_env_names_are_checked(write, capsys):
@@ -189,3 +192,226 @@ def test_env_names_are_checked(write, capsys):
 def test_missing_agent_dir_is_not_a_load_error(write, tmp_path):
     write(BASE + f'\n[[agents]]\ntype = "gone"\ndir = "{tmp_path / "gone"}"\n')
     assert cli.load_config()["agents"][0]["type"] == "gone"
+
+
+def test_parse_name_hyphenated_type():
+    assert cli.parse_name("t", "t-x-t-1") == ("t-x", 1)
+    assert cli.parse_name("t", "hive-queen-t") == ("queen", 1)
+    # a user type `hive` does not collide with the queen
+    assert cli.parse_name("t", "hive-t-1") == ("hive", 1)
+    # the queen is matched exactly, never by prefix
+    assert cli.parse_name("gpu07", "hive-queen-gpu07") == ("queen", 1)
+    assert cli.parse_name("gpu07", "hive-queen-gpu07-1") != ("queen", 1)
+    # numeric and dotted prefixes
+    assert cli.parse_name("1", "a-1-2") == ("a", 2)
+    assert cli.parse_name("1", "hive-queen-1") == ("queen", 1)
+    assert cli.parse_name("g.1-x", "a-g.1-x-3") == ("a", 3)
+    assert cli.parse_name("t", "a-u-1") is None
+    assert cli.parse_name("t", "-t-1") is None
+
+
+def test_parse_legacy_name():
+    assert cli.parse_legacy_name("t", "t-queen") == ("queen", 1)
+    assert cli.parse_legacy_name("t", "t-a-2") == ("a", 2)
+    assert cli.parse_legacy_name("t", "t-b-api-1") == ("b-api", 1)
+    assert cli.parse_legacy_name("t", "x-a-1") is None
+
+
+def test_hive_type_names_distinct_from_queen(write, tmp_path):
+    write(BASE + f'\n[[agents]]\ntype = "hive"\ndir = "{tmp_path}"\n')
+    names = [p.name for p in cli.desired_panes(cli.load_config())]
+    assert names == ["hive-queen-t", "hive-t-1"]
+
+
+def test_hive_queen_type_reserved(write, capsys, tmp_path):
+    write(BASE + f'\n[[agents]]\ntype = "hive-queen"\ndir = "{tmp_path}"\n')
+    fails(capsys, "type 'hive-queen' is reserved for the hive queen")
+
+
+def test_bad_prefix(write, capsys):
+    write('prefix = "a b"\n')
+    fails(capsys, "prefix")
+
+
+LAUNCHERS = BASE + """
+[[launchers]]
+name = "a"
+command = "claude -n {name} --remote-control {name}"
+
+[[launchers]]
+name = "b"
+command = "cb -n {name} --remote-control {name}"
+config_dir = "/cc/b"
+description = "the b one"
+"""
+
+
+def run_hive(monkeypatch, capsys, *argv):
+    monkeypatch.setattr(sys, "argv", ["hive", *argv])
+    try:
+        code = cli.main()
+    except SystemExit as e:
+        code = e.code
+    out, err = capsys.readouterr()
+    return code, out.splitlines(), err
+
+
+def test_launchers_parsed(write):
+    write(LAUNCHERS)
+    cfg = cli.load_config()
+    assert [l["name"] for l in cfg["launchers"]] == ["a", "b"]
+    assert cfg["launchers"][1]["config_dir"] == "/cc/b"
+    assert cfg["launchers"][1]["description"] == "the b one"
+    assert cfg["launchers"][0]["config_dir"] is None
+    assert cfg["default_launcher"] is None
+
+
+def test_launcher_bad_name(write, capsys):
+    write(BASE + '\n[[launchers]]\nname = "Bad Name"\ncommand = "c {name} --remote-control"\n')
+    fails(capsys, "launchers[1].name 'Bad Name' must match")
+
+
+def test_launcher_duplicate_name(write, capsys):
+    block = '\n[[launchers]]\nname = "x"\ncommand = "c {name} --remote-control"\n'
+    write(BASE + block + block)
+    fails(capsys, "duplicate launcher name 'x'")
+
+
+def test_launcher_command_needs_placeholders(write, capsys):
+    write(BASE + '\n[[launchers]]\nname = "x"\ncommand = "c --remote-control"\n')
+    fails(capsys, "launchers[1].command must contain {name} and --remote-control")
+    write(BASE + '\n[[launchers]]\nname = "x"\ncommand = "c {name}"\n')
+    fails(capsys, "must contain {name} and --remote-control")
+    write(BASE + '\n[[launchers]]\nname = "x"\ncommand = "c {name} --remote-control"\nbogus = 1\n')
+    fails(capsys, "bogus")
+
+
+def test_default_launcher_unknown_registry_ok(write):
+    write(BASE.replace("[defaults]\n", '[defaults]\nlauncher = "elsewhere"\n'))
+    assert cli.load_config()["default_launcher"] == "elsewhere"
+
+
+def test_launchers_list_default_first(write, monkeypatch, capsys):
+    write(LAUNCHERS.replace("[defaults]\n", '[defaults]\nlauncher = "b"\n'))
+    for argv in (("launchers",), ("launchers", "list")):
+        code, out, _ = run_hive(monkeypatch, capsys, *argv)
+        assert code == 0
+        assert out[0].startswith('launcher name="b" source=config default=yes config_dir="/cc/b" ')
+        assert out[0].endswith('description="the b one"')
+        assert out[1].startswith('launcher name="a" source=config default=no config_dir="default" ')
+
+
+def discover_config(tmp_path, script):
+    path = tmp_path / "discover.sh"
+    path.write_text(f"#!/bin/sh\n{script}\n")
+    path.chmod(0o755)
+    return f'\n[queen]\ndiscover = "{path}"\n'
+
+
+def test_launchers_list_includes_discover(write, tmp_path, monkeypatch, capsys):
+    queen = discover_config(
+        tmp_path, "echo 'name=x config_dir=/cc/x command=\"d {name} --remote-control\"'\n"
+                  "echo 'name=a config_dir=/cc/a command=\"d2 {name} --remote-control\"'")
+    write(LAUNCHERS + queen)
+    code, out, _ = run_hive(monkeypatch, capsys, "launchers")
+    assert code == 0
+    assert [l.split()[1] for l in out] == ['name="a"', 'name="b"', 'name="x"', 'name="a"']
+    assert "source=discover" in out[2] and "shadowed=yes" not in out[2]
+    assert "source=discover" in out[3] and out[3].endswith("shadowed=yes")
+
+
+def test_launchers_list_discover_error(write, tmp_path, monkeypatch, capsys):
+    write(LAUNCHERS + discover_config(tmp_path, "echo boom >&2; exit 3"))
+    code, out, _ = run_hive(monkeypatch, capsys, "launchers", "list")
+    assert code == 0
+    assert [l.split()[0] for l in out] == ["launcher", "launcher", "discover"]
+    assert out[2].startswith('discover error="discover command failed (exit 3): boom')
+
+
+def make_launcher(directory, name="mycl"):
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / name
+    path.write_text("#!/bin/sh\nexit 0\n")
+    path.chmod(0o755)
+    return path
+
+
+CMD = "{} -n {{name}} --remote-control {{name}}"
+
+
+def test_launchers_add_ok(write, tmp_path, monkeypatch, capsys):
+    path = write(BASE)
+    tool = make_launcher(tmp_path / "bin")
+    code, out, _ = run_hive(monkeypatch, capsys, "launchers", "add", "mine", CMD.format(tool),
+                            "--config-dir", "/cc/mine", "--description", "my one")
+    assert code == 0 and out[0].startswith('launcher added name="mine" default=yes')
+    cfg = cli.load_config()
+    assert cfg["default_launcher"] == "mine"
+    assert cfg["launchers"][0]["config_dir"] == "/cc/mine"
+    code, out, _ = run_hive(monkeypatch, capsys, "launchers", "add", "second", CMD.format(tool))
+    assert code == 0 and "default=no" in out[0]
+    assert cli.load_config()["default_launcher"] == "mine"
+    code, out, _ = run_hive(monkeypatch, capsys, "launchers")
+    assert [l.split()[1] for l in out] == ['name="mine"', 'name="second"']
+    assert path.read_text().startswith(BASE.replace("[defaults]\n", '[defaults]\nlauncher = "mine"\n'))
+
+
+def test_launchers_add_symlink_outside_roots(write, tmp_path, monkeypatch, capsys):
+    write(BASE)
+    target = make_launcher(tmp_path / "elsewhere", "real-claude")
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "claude").symlink_to(target)
+    monkeypatch.setenv("PATH", f"{bindir}:/usr/bin:/bin")
+    code, out, err = run_hive(monkeypatch, capsys, "launchers", "add", "viapath",
+                              "claude -n {name} --remote-control {name}")
+    assert code == 0, err
+    assert [l["name"] for l in cli.load_config()["launchers"]] == ["viapath"]
+
+
+def test_launchers_add_duplicate(write, tmp_path, monkeypatch, capsys):
+    queen = discover_config(
+        tmp_path, "echo 'name=x config_dir=/cc/x command=\"d {name} --remote-control\"'")
+    path = write(LAUNCHERS + queen)
+    before = path.read_text()
+    tool = make_launcher(tmp_path / "bin")
+    for name in ("a", "x"):
+        code, _, err = run_hive(monkeypatch, capsys, "launchers", "add", name, CMD.format(tool))
+        assert code == 2 and "already exists" in err
+    assert path.read_text() == before
+
+
+def test_launchers_add_not_found(write, tmp_path, monkeypatch, capsys):
+    path = write(BASE)
+    before = path.read_text()
+    code, _, err = run_hive(monkeypatch, capsys, "launchers", "add", "ghost",
+                            CMD.format(tmp_path / "nope" / "claude"))
+    assert code == 2 and "not found" in err
+    assert path.read_text() == before
+
+
+def test_launchers_add_private_refused(write, tmp_path, monkeypatch, capsys):
+    path = write(BASE)
+    before = path.read_text()
+    tool = make_launcher(tmp_path / "private" / "bin")
+    code, _, err = run_hive(monkeypatch, capsys, "launchers", "add", "secret", CMD.format(tool))
+    assert code == 3 and "refused" in err
+    assert path.read_text() == before
+
+
+def test_launchers_default_set(write, tmp_path, monkeypatch, capsys):
+    queen = discover_config(
+        tmp_path, "echo 'name=x config_dir=/cc/x command=\"d {name} --remote-control\"'")
+    write(LAUNCHERS + queen)
+    for name in ("b", "x"):
+        code, out, _ = run_hive(monkeypatch, capsys, "launchers", "default", name)
+        assert code == 0 and out[0].startswith(f'default launcher="{name}"')
+        assert cli.load_config()["default_launcher"] == name
+
+
+def test_launchers_default_unknown(write, monkeypatch, capsys):
+    path = write(LAUNCHERS)
+    before = path.read_text()
+    code, _, err = run_hive(monkeypatch, capsys, "launchers", "default", "nope")
+    assert code == 2 and "available: a, b" in err
+    assert path.read_text() == before

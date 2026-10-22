@@ -1,7 +1,7 @@
 # hive config: ${XDG_CONFIG_HOME:-~/.config}/hive/config.toml
 # Unknown keys are errors.
 
-# prefix = "myhost"              # default: hostname
+# prefix = "myhost"              # machine part of instance and window names; default: short hostname
 # session = "myhost-agents"      # default: "<prefix>-agents"
 # tmux_socket = "hive"           # tmux -L name; default "hive"; use another for test/isolated configs
 # prefix and session: no ".", ":" or whitespace.
@@ -12,11 +12,12 @@
 # inspect_roots = ["~/.local/bin", "/usr/local/bin", "/usr/bin", "/bin", "/opt"]   # the default; the only dirs `hive inspect-launcher` reads from
 
 [defaults]
-# Placeholders: {name} = "<prefix>-<type>-<index>", {type}, {index}, {dir}, {prefix}
+# Placeholders: {name} = "<type>-<machine>-<index>" (machine = prefix), {type}, {index}, {dir}, {prefix}
 command = "claude -n {name} --remote-control {name} --permission-mode auto"
+# launcher = "claude"            # default launcher for new types; a [[launchers]] name or a discover name
 
 # [queen]                        # optional; the queen always starts, in <config dir>/queen
-# The queen's command always gets `--tools Bash,Monitor,Read,Grep,Glob,Edit,Write,NotebookEdit --strict-mcp-config`
+# The queen's command always gets `--tools Bash,Monitor,Read,Grep,Glob,Edit,Write,NotebookEdit,AskUserQuestion --strict-mcp-config`
 # appended (unless it already has --tools / --strict-mcp-config), so it has no WebFetch, Agent or MCP tools.
 # command = "claude -n {name} --remote-control {name} --permission-mode auto"   # default: [defaults] command
 # discover = "claude-supervisor list"   # `hive discover` runs this and prints its output; `hive spawn --sandbox NAME` reads it:
@@ -31,6 +32,13 @@ command = "claude -n {name} --remote-control {name} --permission-mode auto"
 [service]                        # optional, extra units for After= in hive.service
 # after = ["ssh-agent.service"]
 
+# Launchers: named commands that new types can use, e.g. a sandboxed claude. `hive launchers` lists them.
+# [[launchers]]
+# name = "claude"                  # required, unique, [a-z0-9][a-z0-9-]*
+# command = "claude -n {name} --remote-control {name} --permission-mode auto"   # required; must contain {name} and --remote-control
+# config_dir = "~/.claude"         # optional: Claude config dir of this launcher (trust file location); never exported
+# description = "plain claude"     # optional
+
 # Agents: one tmux window per type, one pane per instance. None are configured, so
 # `hive up` starts only the queen. Add them with `hive spawn DIR` (or ask the queen),
 # or uncomment and edit the entry below; `dir` must exist.
@@ -39,7 +47,7 @@ command = "claude -n {name} --remote-control {name} --permission-mode auto"
 # A command without --remote-control, or whose program is not on PATH, only gets a warning when its pane starts.
 
 # [[agents]]
-# type = "project"                 # required, unique; window "<prefix>-<type>"
+# type = "project"                 # required, unique; window "<type>-<machine>"
 # dir = "~/work/my-project"        # must exist
 # count = 1                        # panes; default 1; 0 keeps the entry without panes
 # command = "claude -n {name} --remote-control {name}"   # optional per-type override of defaults.command

@@ -91,9 +91,22 @@ def append_agent(text, type_, dir_, count, command=None, env=None, config_dir=No
     return head + "\n\n" + block if head.strip() else block
 
 
+def append_launcher(text, name, command, config_dir=None, description=None):
+    block = f"[[launchers]]\nname = {toml_string(name)}\ncommand = {toml_string(command)}\n"
+    if config_dir is not None:
+        block += f"config_dir = {toml_string(config_dir)}\n"
+    if description is not None:
+        block += f"description = {toml_string(description)}\n"
+    head = text.rstrip("\n")
+    return head + "\n\n" + block if head.strip() else block
+
+
 ROOTS_RE = re.compile(r"^(\s*search_roots\s*=\s*)(\[.*?\])(\s*(#.*)?)$")
 ROOTS_KEY_RE = re.compile(r"^\s*search_roots\s*=")
 TABLE_RE = re.compile(r"^\s*\[")
+DEFAULTS_RE = re.compile(r"^\s*\[\s*defaults\s*\]\s*(#.*)?$")
+LAUNCHER_KEY_RE = re.compile(r"^(\s*launcher\s*=\s*)(\"(?:[^\"\\]|\\.)*\"|'[^']*')(\s*(#.*)?)$")
+LAUNCHER_ANY_RE = re.compile(r"^\s*launcher\s*=")
 
 
 def _parses(line):
@@ -125,6 +138,35 @@ def set_search_roots(text, roots):
         lines[at - 1] += "\n"
     lines.insert(at, f"search_roots = {value}\n")
     return "".join(lines)
+
+
+def set_default_launcher(text, name):
+    """Set `launcher` in [defaults]: replace the line, insert it after the header, or add the table."""
+    lines = text.splitlines(keepends=True)
+    value = toml_string(name)
+    head = next((i for i, line in enumerate(lines) if DEFAULTS_RE.match(line.rstrip("\r\n"))), None)
+    if head is None:
+        base = text.rstrip("\n")
+        block = f"[defaults]\nlauncher = {value}\n"
+        new = base + "\n\n" + block if base.strip() else block
+    else:
+        end = next((i for i in range(head + 1, len(lines)) if TABLE_RE.match(lines[i])), len(lines))
+        for i in range(head + 1, end):
+            if LAUNCHER_ANY_RE.match(lines[i]):
+                body = lines[i].rstrip("\r\n")
+                m = LAUNCHER_KEY_RE.match(body)
+                if not m:
+                    raise EditError("defaults.launcher is not a one-line string; edit it by hand")
+                lines[i] = m.group(1) + value + m.group(3) + lines[i][len(body):]
+                break
+        else:
+            if not lines[head].endswith(("\n", "\r")):
+                lines[head] += "\n"
+            eol = lines[head][len(lines[head].rstrip("\r\n")):]
+            lines.insert(head + 1, f"launcher = {value}{eol}")
+        new = "".join(lines)
+    verify(text, new, lambda doc: doc.setdefault("defaults", {}).__setitem__("launcher", name))
+    return new
 
 
 def verify(old_text, new_text, mutate, path="config"):
