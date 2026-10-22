@@ -774,7 +774,8 @@ def cmd_init(args):
     example = resources.files("hive").joinpath("config.example.toml").read_text()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(example)
-    print(f"wrote {path}; edit it, then run 'hive up'")
+    print(f"wrote {path}; it has no agents yet, so 'hive up' starts only the queen; "
+          "add agents with 'hive spawn DIR' or by editing it")
     return 0
 
 

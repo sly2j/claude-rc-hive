@@ -164,3 +164,14 @@ def test_per_type_env_value_must_be_str(write, capsys, tmp_path):
     fails(capsys, "agents[1].env.X must be a string")
     write(BASE + '\n[queen]\nenv = "x"\n')
     fails(capsys, "'queen.env' must be dict")
+
+
+def test_init_writes_a_config_that_up_accepts(tmp_path, monkeypatch, capsys):
+    # A fresh deploy: no project dirs exist, so the example must not reference any.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    assert cli.cmd_init(None) == 0
+    cfg = cli.load_config(check_dirs=True)
+    assert cfg["agents"] == []
+    assert cfg["queen"]["command"] == cli.DEFAULT_QUEEN_COMMAND
+    assert [p.name for p in cli.desired_panes(cfg)] == [f"{cfg['prefix']}-queen"]

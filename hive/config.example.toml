@@ -27,18 +27,16 @@ command = "claude -n {name} --remote-control {name} --permission-mode auto"
 [service]                        # optional, extra units for After= in hive.service
 # after = ["ssh-agent.service"]
 
-[[agents]]                       # one tmux window per type, one pane per instance
-type = "notes"                   # required, unique; window "<prefix>-<type>"
-dir = "~/notes"                  # must exist
-count = 2                        # panes; default 1; 0 keeps the entry without panes
+# Agents: one tmux window per type, one pane per instance. None are configured, so
+# `hive up` starts only the queen. Add them with `hive spawn DIR` (or ask the queen),
+# or uncomment and edit the entry below; `dir` must exist.
+# Workspace trust: hive never seeds Claude Code's folder trust silently. `hive spawn` exits 3 for an untrusted
+# directory until you rerun it with --trust; `hive up` / `hive reconcile` warn `untrusted <name> <root>` on stderr.
 
-[[agents]]
-type = "project"
-dir = "~/work/my-project"
-count = 1
+# [[agents]]
+# type = "project"                 # required, unique; window "<prefix>-<type>"
+# dir = "~/work/my-project"        # must exist
+# count = 1                        # panes; default 1; 0 keeps the entry without panes
 # command = "claude -n {name} --remote-control {name}"   # optional per-type override of defaults.command
 # config_dir = "~/.claude-sandbox"   # optional: Claude config dir of this type's command; only used to find the trust file <config_dir>/.claude.json, never exported
 # env = { FOO = "bar" }              # optional per-type env (also: hive spawn --env KEY=VALUE); CLAUDE_CONFIG_DIR is rejected, use config_dir
-
-# Workspace trust: hive never seeds Claude Code's folder trust silently. `hive spawn` exits 3 for an untrusted
-# directory until you rerun it with --trust; `hive up` / `hive reconcile` warn `untrusted <name> <root>` on stderr.

@@ -21,7 +21,7 @@ Update after pulling or changing the repo (both were verified to pick up a new `
 uv tool upgrade hive         # or: uv tool install --reinstall .
 ```
 
-Then `hive init` writes `${XDG_CONFIG_HOME:-~/.config}/hive/config.toml` from the example; edit it and run `hive up`.
+Then `hive init` writes `${XDG_CONFIG_HOME:-~/.config}/hive/config.toml` from the example. It has no agents, so `hive up` works right away and starts only the queen; add agents with `hive spawn DIR` (or ask the queen), or edit the file.
 
 ## Config
 
@@ -68,7 +68,7 @@ Placeholders in commands, replaced by plain text substitution (other braces such
 | `hive dirs [ROOT] [--depth N]` | Read-only: list the directories under each search root (or under ROOT: a search root, a directory inside one, or a name resolved as for `spawn`), N levels deep (default 1, max 3). Prints `root=<path>` per root (`root=<path> error=<reason>` if it cannot be read), then `dir=<path> name=<basename> type=<type>\|none` per directory, `type` being the `[[agents]]` entry using that directory. Skips hidden entries and `secrets`/`private` directories, lists a symlink only if it resolves inside `search_roots` and never descends into one; at most 500 records, then `more=yes`. A ROOT outside `search_roots` is `refused: ...`, exit 3; unset `search_roots` exits 2. |
 | `hive roots [add PATH \| remove PATH]` | Without arguments print `root=<path>` per search root (`roots=none` if unset). `add` appends an existing directory to `search_roots` in `config.toml` (written as `~/...` when PATH starts with `~`, else resolved), `unchanged` if already present, refused (exit 3) under a `secrets`/`private` path; `remove` drops the entry naming that directory (`not found`, exit 2). Only rewrites a one-line `search_roots = [...]` (or inserts one) and keeps the rest of the file as is. |
 | `hive inspect-launcher COMMAND` | Read-only look at the launcher of a launch command (one argument, e.g. `"claude-supervisor run api -- -n {name}"`): resolves its first word on `PATH` and through symlinks, reads it only if both paths are under `inspect_roots` and not under a `secrets`/`private` path (else `refused: ...`, exit 3; `not found: ...`, exit 2). Prints `path=... resolved=... kind=script\|binary`, for scripts the lines mentioning `CLAUDE_CONFIG_DIR`, `claude`, `exec`, `env`, `export`, `HOME=` or `XDG_CONFIG_HOME` as `line=N text=...` (secret-like lines as `redacted=secret-like`, at most 200), and last `env CLAUDE_CONFIG_DIR=<value>\|unset` from hive's own environment. Never runs the launcher. |
-| `hive init` | Write the example config if none exists. |
+| `hive init` | Write the example config if none exists. It defines no agents; the commented `[[agents]]` entry shows the keys. |
 | `hive install-service [--enable]` | Write `~/.config/systemd/user/hive.service` and reload; `--enable` also runs `enable --now`. |
 | `hive uninstall-service` | Disable, remove the unit, reload. |
 | `hive --version` | Print the version. |

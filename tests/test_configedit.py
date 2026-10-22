@@ -9,6 +9,19 @@ from hive import configedit
 from hive.configedit import EditError, append_agent, set_count, verify, write_atomic
 
 EXAMPLE = (Path(configedit.__file__).parent / "config.example.toml").read_text()
+# The example ships without agents; this is it after two spawns and some hand edits.
+POPULATED = EXAMPLE + """
+[[agents]]                       # one tmux window per type
+type = "notes"
+dir = "~/notes"
+count = 2                        # panes
+
+[[agents]]
+type = "project"
+dir = "~/work/my-project"
+count = 1
+# command = "claude -n {name} --remote-control {name}"
+"""
 
 NO_NEWLINE = '[[agents]]\ntype = "a"\ndir = "/a"\ncount = 1'
 
@@ -63,15 +76,15 @@ def edit_count(text, type_, n):
 
 
 def test_set_count_example_keeps_comment():
-    new = edit_count(EXAMPLE, "notes", 5)
-    old_line = next(l for l in EXAMPLE.splitlines() if l.startswith("count = 2"))
+    new = edit_count(POPULATED, "notes", 5)
+    old_line = next(l for l in POPULATED.splitlines() if l.startswith("count = 2"))
     assert "#" in old_line
-    assert changes(EXAMPLE, new) == ["-" + old_line, "+" + old_line.replace("2", "5", 1)]
+    assert changes(POPULATED, new) == ["-" + old_line, "+" + old_line.replace("2", "5", 1)]
 
 
 def test_set_count_example_second_block_to_zero():
-    new = edit_count(EXAMPLE, "project", 0)
-    assert changes(EXAMPLE, new) == ["-count = 1", "+count = 0"]
+    new = edit_count(POPULATED, "project", 0)
+    assert changes(POPULATED, new) == ["-count = 1", "+count = 0"]
 
 
 def test_set_count_no_trailing_newline():
@@ -110,9 +123,9 @@ def test_set_count_missing_count_at_eof_without_newline():
 
 
 def test_set_count_preserves_crlf():
-    text = EXAMPLE.replace("\n", "\r\n")
+    text = POPULATED.replace("\n", "\r\n")
     new = edit_count(text, "notes", 7)
-    assert new.replace("\r\n", "\n") == set_count(EXAMPLE, "notes", 7)
+    assert new.replace("\r\n", "\n") == set_count(POPULATED, "notes", 7)
     assert new.count("\r\n") == text.count("\r\n")
     missing = SERVICE.replace("\n", "\r\n")
     assert "count = 3\r\n" in edit_count(missing, "a", 3)
@@ -120,7 +133,7 @@ def test_set_count_preserves_crlf():
 
 def test_set_count_unknown_type():
     with pytest.raises(EditError, match="no \\[\\[agents\\]\\] block with type 'nope'"):
-        set_count(EXAMPLE, "nope", 1)
+        set_count(POPULATED, "nope", 1)
     with pytest.raises(EditError):
         set_count("", "a", 1)
 
@@ -177,13 +190,13 @@ def test_control_characters_are_refused(bad):
 
 def test_verify_raises_on_mismatch(tmp_path):
     path = tmp_path / "config.toml"
-    path.write_text(EXAMPLE)
-    wrong = set_count(EXAMPLE, "notes", 5)
+    path.write_text(POPULATED)
+    wrong = set_count(POPULATED, "notes", 5)
     with pytest.raises(EditError, match=f"unexpected result; {path} left unchanged"):
-        verify(EXAMPLE, wrong, count_mutation("notes", 6), path=str(path))
+        verify(POPULATED, wrong, count_mutation("notes", 6), path=str(path))
     with pytest.raises(EditError, match="unexpected result; config left unchanged"):
-        verify(EXAMPLE, wrong, lambda doc: None)
-    assert path.read_text() == EXAMPLE
+        verify(POPULATED, wrong, lambda doc: None)
+    assert path.read_text() == POPULATED
 
 
 def test_verify_raises_on_invalid_toml():
