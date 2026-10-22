@@ -6,3 +6,6 @@ dist/
 .venv/
 venv/
 .eggs/
+
+# Claude Code local state
+.claude/
