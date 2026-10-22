@@ -25,6 +25,7 @@ from hive.configedit import (ENV_KEY_RE, EditError, append_agent, set_count,
                              set_search_roots, verify, write_atomic)
 from hive.dirs import MAX_DEPTH, PRIVATE_NAMES, list_dirs
 from hive.inspect import DEFAULT_ROOTS, inspect_launcher
+from hive.paths import PathError, expanduser
 from hive.reconcile import (Existing, ResolveError, RunningPane, desired_panes,
                             parse_records, plan, resolve_target, sandbox_type)
 from hive.trust import (TrustError, is_trusted, looks_like_trust_prompt, seed_trust,
@@ -37,8 +38,14 @@ TOP_KEYS = {"prefix", "session", "tmux_socket", "login_shell", "shell",
             "inspect_roots"}
 AGENT_KEYS = {"type", "dir", "count", "command", "env", "config_dir"}
 QUEEN_KEYS = {"command", "discover", "env", "config_dir"}
-# Used when neither [queen] nor [defaults] sets a command, so 1.5 configs keep loading.
+# Used when neither [queen] nor [defaults] sets a command.
 DEFAULT_QUEEN_COMMAND = "claude -n {name} --remote-control {name} --permission-mode auto"
+# Tool allowlist for the queen; the guard hook enforces the same set.
+QUEEN_TOOLS = "Bash,Monitor,Read,Grep,Glob,Edit,Write,NotebookEdit"
+TYPE_RE = re.compile(r"[A-Za-z0-9._-]+")
+# tmux rewrites or mis-targets names with these.
+BAD_NAME_RE = re.compile(r"[.:\s]")
+DISCOVER_TIMEOUT = 60
 QUEEN_HEADER = "<!-- managed by hive; do not edit, put additions in CLAUDE.local.md -->\n"
 
 UNIT_TEMPLATE = """\
@@ -51,7 +58,7 @@ After={after}
 Type=oneshot
 RemainAfterExit=yes
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart={exe} up
+{extra_env}ExecStart={exe} up
 ExecStop={exe} down
 # The tmux server forked by `hive up` stays in this cgroup while the unit is
 # active. tmux may move pane processes into their own tmux-spawn-*.scope units;
@@ -68,6 +75,14 @@ def die(message, code=2):
     sys.exit(code)
 
 
+def warn(message):
+    print(f"hive: warning: {message}", file=sys.stderr)
+
+
+class ConfigError(Exception):
+    """config.toml is unusable; the message names the file and the key."""
+
+
 def config_home():
     return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
 
@@ -80,14 +95,23 @@ LOCK_WAIT = 30.0
 _lock = None
 
 
-def hold_lock():
-    """Serialize commands that edit the config or the session, until exit."""
+def hold_lock(required=True):
+    """Serialize commands that edit the config or the session, until exit.
+
+    With required=False (`down`), a lock file that cannot be opened only warns:
+    systemd's ExecStop must still be able to stop the session."""
     global _lock
     if _lock is not None:
         return
     path = config_home() / "hive" / ".lock"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    f = open(path, "a")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        f = open(path, "a")
+    except OSError as e:
+        if not required:
+            warn(f"cannot open lock {path}: {e.strerror or e}; continuing without it")
+            return
+        die(f"cannot open lock {path}: {e.strerror or e}", 1)
     deadline = time.monotonic() + LOCK_WAIT
     while True:
         try:
@@ -105,13 +129,53 @@ def hold_lock():
 def check_keys(table, allowed, where, path):
     for key in table:
         if key not in allowed:
-            die(f"{path}: unknown key '{key}' in {where} (allowed: {', '.join(sorted(allowed))})")
+            raise ConfigError(f"{path}: unknown key '{key}' in {where} "
+                              f"(allowed: {', '.join(sorted(allowed))})")
+
+
+TOML_TYPES = {list: "an array", dict: "a table", int: "an integer", str: "a string"}
 
 
 def check_type(value, expected, key, path):
     # bool is an int subclass; never accept it as a count
     if not isinstance(value, expected) or isinstance(value, bool):
-        die(f"{path}: '{key}' must be {expected.__name__}")
+        what = "an array of [[agents]] tables" if key == "agents" else TOML_TYPES[expected]
+        raise ConfigError(f"{path}: '{key}' must be {what}")
+
+
+def check_name(value, key, path):
+    """prefix and session end up in tmux targets."""
+    check_type(value, str, key, path)
+    if not value or BAD_NAME_RE.search(value):
+        raise ConfigError(f"{path}: '{key}' = {value!r} must be non-empty and contain no '.', "
+                          "':' or whitespace (tmux rewrites or mis-targets them)")
+
+
+def check_socket(value, key, path):
+    """tmux -L takes any name without whitespace."""
+    check_type(value, str, key, path)
+    if not value or re.search(r"\s", value):
+        raise ConfigError(f"{path}: '{key}' = {value!r} must be non-empty and contain no whitespace")
+
+
+def check_text(value, key, path):
+    """A non-blank string (command, shell)."""
+    check_type(value, str, key, path)
+    if not value.strip():
+        raise ConfigError(f"{path}: '{key}' must not be empty")
+
+
+def abs_path(text, label, path):
+    """~ expanded, absolute; relative paths would depend on the caller's cwd."""
+    if not text.strip():
+        raise ConfigError(f"{path}: {label} must not be empty")
+    try:
+        directory = expanduser(text)
+    except PathError as e:
+        raise ConfigError(f"{path}: {label}: {e}") from None
+    if not directory.is_absolute():
+        raise ConfigError(f"{path}: {label} '{text}' must be an absolute path or start with ~")
+    return str(directory)
 
 
 CONFIG_DIR_ENV_MSG = ("hive never sets CLAUDE_CONFIG_DIR (the launched command does); "
@@ -122,11 +186,11 @@ def check_env(env, where, path):
     check_type(env, dict, where, path)
     for key, value in env.items():
         if not ENV_KEY_RE.fullmatch(key):
-            die(f"{path}: {where}.{key}: env names must match {ENV_KEY_RE.pattern}")
+            raise ConfigError(f"{path}: {where}.{key}: env names must match {ENV_KEY_RE.pattern}")
         if not isinstance(value, str):
-            die(f"{path}: {where}.{key} must be a string")
+            raise ConfigError(f"{path}: {where}.{key} must be a string")
         if key == "CLAUDE_CONFIG_DIR":
-            die(f"{path}: {where}.CLAUDE_CONFIG_DIR: {CONFIG_DIR_ENV_MSG}")
+            raise ConfigError(f"{path}: {where}.CLAUDE_CONFIG_DIR: {CONFIG_DIR_ENV_MSG}")
 
 
 def check_config_dir(table, where, path):
@@ -135,40 +199,111 @@ def check_config_dir(table, where, path):
     if value is None:
         return None
     check_type(value, str, f"{where}.config_dir", path)
-    return expand_config_dir(value, f"{path}: {where}.config_dir")
+    return abs_path(value, f"{where}.config_dir", path)
+
+
+def read_config(path):
+    """Parse config.toml; ConfigError on a missing, unreadable or malformed file."""
+    if not path.exists():
+        raise ConfigError(f"{path} not found; run 'hive init' to create it")
+    try:
+        with open(path, "rb") as f:
+            return tomllib.load(f)
+    except tomllib.TOMLDecodeError as e:
+        raise ConfigError(f"{path}: {e}") from None
+    except (OSError, UnicodeDecodeError) as e:
+        raise ConfigError(f"cannot read {path}: {getattr(e, 'strerror', None) or e}") from None
 
 
 def load_config():
+    """The validated config, or exit 2 with a message."""
+    try:
+        return parse_config()
+    except (ConfigError, PathError) as e:
+        die(str(e))
+
+
+def lenient_config():
+    """(config for `down` and `status`, warning or None) that works with a broken config.
+
+    Falls back to the defaults for names the config does not set. A name that is set but
+    invalid is an error: guessing the default socket could stop a different hive.
+    """
     path = config_path()
     if not path.exists():
-        die(f"{path} not found; run 'hive init' to create it")
+        raise ConfigError(f"{path} not found; run 'hive init' to create it")
     try:
-        with open(path, "rb") as f:
-            raw = tomllib.load(f)
-    except tomllib.TOMLDecodeError as e:
-        die(f"{path}: {e}")
+        return parse_config(), None
+    except (ConfigError, PathError) as e:
+        problem = str(e)
+    try:
+        raw = read_config(path)
+    except ConfigError:
+        raw = top_level_names(path)
+
+    def pick(key, default, check=check_name):
+        if key not in raw:
+            return default
+        check(raw[key], key, path)
+        return raw[key]
+
+    prefix = pick("prefix", socket.gethostname().split(".")[0])
+    session = pick("session", f"{prefix}-agents")
+    sock = pick("tmux_socket", "hive", check_socket)
+    return ({"prefix": prefix, "session": session, "socket": sock,
+             "pane_shell": None, "env": {}, "agents": [], "config_path": str(path)},
+            f"{problem}\n  using session {session} on socket {sock} (from the parsable lines "
+            "of the config, else the defaults)")
+
+
+def top_level_names(path):
+    """prefix, session and tmux_socket from single top-level lines of a config TOML cannot parse.
+
+    A typo elsewhere in the file must not send `down` to the default socket when the
+    config names its own: that would stop a different hive."""
+    found = {}
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return found
+    for line in lines:
+        if line.lstrip().startswith("["):
+            break  # top-level keys end at the first table
+        m = re.match(r"\s*(prefix|session|tmux_socket)\s*=", line)
+        if m:
+            try:
+                found.update(tomllib.loads(line))
+            except tomllib.TOMLDecodeError as e:
+                # Set but unreadable: guessing the default could hit another hive.
+                raise ConfigError(f"{path}: cannot parse the {m.group(1)} line ({e}): {line.strip()}")
+    return found
+
+
+def parse_config():
+    path = config_path()
+    raw = read_config(path)
 
     check_keys(raw, TOP_KEYS, "top level", path)
 
     prefix = raw.get("prefix", socket.gethostname().split(".")[0])
-    check_type(prefix, str, "prefix", path)
+    check_name(prefix, "prefix", path)
     session = raw.get("session", f"{prefix}-agents")
-    check_type(session, str, "session", path)
+    check_name(session, "session", path)
     tmux_socket = raw.get("tmux_socket", "hive")
-    check_type(tmux_socket, str, "tmux_socket", path)
+    check_socket(tmux_socket, "tmux_socket", path)
 
     login_shell = raw.get("login_shell", True)
     if not isinstance(login_shell, bool):
-        die(f"{path}: 'login_shell' must be true or false")
+        raise ConfigError(f"{path}: 'login_shell' must be true or false")
     shell = raw.get("shell", default_shell())
-    check_type(shell, str, "shell", path)
+    check_text(shell, "shell", path)
 
     defaults = raw.get("defaults", {})
     check_type(defaults, dict, "defaults", path)
     check_keys(defaults, {"command"}, "[defaults]", path)
     default_command = defaults.get("command")
     if default_command is not None:
-        check_type(default_command, str, "defaults.command", path)
+        check_text(default_command, "defaults.command", path)
 
     env = raw.get("env", {})
     check_env(env, "env", path)
@@ -178,29 +313,26 @@ def load_config():
     check_keys(service, {"after"}, "[service]", path)
     after = service.get("after", [])
     if not isinstance(after, list) or not all(isinstance(a, str) for a in after):
-        die(f"{path}: service.after must be a list of strings")
+        raise ConfigError(f"{path}: service.after must be an array of strings")
 
     search_roots = raw.get("search_roots", [])
     if not isinstance(search_roots, list) or not all(isinstance(r, str) for r in search_roots):
-        die(f"{path}: search_roots must be a list of strings")
-    search_roots = [str(Path(r).expanduser()) for r in search_roots]
+        raise ConfigError(f"{path}: search_roots must be an array of strings")
+    search_roots = [abs_path(r, "search_roots entry", path) for r in search_roots]
 
     inspect_roots = raw.get("inspect_roots", DEFAULT_ROOTS)
     if not isinstance(inspect_roots, list) or not all(isinstance(r, str) for r in inspect_roots):
-        die(f"{path}: inspect_roots must be a list of strings")
-    inspect_roots = [str(Path(r).expanduser()) for r in inspect_roots]
-    for r in inspect_roots:
-        if not Path(r).is_absolute():
-            die(f"{path}: inspect_roots entry '{r}' must be an absolute path or start with ~")
+        raise ConfigError(f"{path}: inspect_roots must be an array of strings")
+    inspect_roots = [abs_path(r, "inspect_roots entry", path) for r in inspect_roots]
 
     queen = raw.get("queen", {})
     check_type(queen, dict, "queen", path)
     check_keys(queen, QUEEN_KEYS, "[queen]", path)
     queen_command = queen.get("command", default_command or DEFAULT_QUEEN_COMMAND)
-    check_type(queen_command, str, "queen.command", path)
+    check_text(queen_command, "queen.command", path)
     discover = queen.get("discover")
     if discover is not None:
-        check_type(discover, str, "queen.discover", path)
+        check_text(discover, "queen.discover", path)
     queen_env = queen.get("env", {})
     check_env(queen_env, "queen.env", path)
     queen_config_dir = check_config_dir(queen, "queen", path)
@@ -216,34 +348,38 @@ def load_config():
         check_keys(entry, AGENT_KEYS, where, path)
         for key in ("type", "dir"):
             if key not in entry:
-                die(f"{path}: {where} is missing required key '{key}'")
+                raise ConfigError(f"{path}: {where} is missing required key '{key}'")
         check_type(entry["type"], str, f"{where}.type", path)
         check_type(entry["dir"], str, f"{where}.dir", path)
         kind = entry["type"]
         if not kind:
-            die(f"{path}: {where}.type must not be empty")
+            raise ConfigError(f"{path}: {where}.type must not be empty")
         if kind == "queen":
-            die(f"{path}: {where}.type 'queen' is reserved for the hive queen")
+            raise ConfigError(f"{path}: {where}.type 'queen' is reserved for the hive queen")
+        if not TYPE_RE.fullmatch(kind):
+            raise ConfigError(f"{path}: {where}.type '{kind}' may only contain letters, digits, "
+                              "'.', '_' and '-'")
         if kind in seen:
-            die(f"{path}: duplicate agent type '{kind}'")
+            raise ConfigError(f"{path}: duplicate agent type '{kind}'")
         seen.add(kind)
 
-        directory = Path(entry["dir"]).expanduser()
+        directory = abs_path(entry["dir"], f"{where}.dir", path)
 
         count = entry.get("count", 1)
         check_type(count, int, f"{where}.count", path)
         if count < 0:
-            die(f"{path}: {where}.count must be >= 0")
+            raise ConfigError(f"{path}: {where}.count must be >= 0")
 
         command = entry.get("command", default_command)
         if command is None:
-            die(f"{path}: {where} has no 'command' and [defaults] has no 'command'")
-        check_type(command, str, f"{where}.command", path)
+            raise ConfigError(f"{path}: {where} has no 'command' and [defaults] has no "
+                              "'command'")
+        check_text(command, f"{where}.command", path)
 
         agent_env = entry.get("env", {})
         check_env(agent_env, f"{where}.env", path)
 
-        agents.append({"type": kind, "dir": str(directory), "count": count, "command": command,
+        agents.append({"type": kind, "dir": directory, "count": count, "command": command,
                        "env": agent_env, "config_dir": check_config_dir(entry, where, path)})
 
     return {
@@ -258,10 +394,19 @@ def load_config():
         "search_roots": search_roots,
         "inspect_roots": inspect_roots,
         "queen": {"type": "queen", "dir": str(config_home() / "hive" / "queen"),
-                  "command": queen_command, "env": queen_env, "config_dir": queen_config_dir},
+                  "command": queen_command_line(queen_command), "env": queen_env, "config_dir": queen_config_dir},
         "discover": discover,
         "config_path": str(path),
     }
+
+
+def queen_command_line(command):
+    """The queen runs with a tool allowlist and no MCP servers, whatever command it got."""
+    if not re.search(r"(^|\s)--tools(\s|=|$)", command):
+        command += f" --tools {QUEEN_TOOLS}"
+    if not re.search(r"(^|\s)--strict-mcp-config(\s|$)", command):
+        command += " --strict-mcp-config"
+    return command
 
 
 def default_shell():
@@ -409,22 +554,49 @@ def warn_untrusted(cfg, pane):
     """Warn only: hive never records trust without an explicit --trust."""
     root, _, trusted = trust_state(pane.dir, pane.config_dir)
     if not trusted:
-        print(f"untrusted {pane.name} {root}", file=sys.stderr)
+        warn(f"untrusted {pane.name} {root}; attach and accept Claude's trust prompt, "
+             "or run 'hive spawn --trust' after the user confirms")
+
+
+_warned = set()
+
+
+def preflight(cfg, pane):
+    """Warn (never fail) about a command that probably will not work as a pane."""
+    command = expand_pane(cfg, pane)
+    if "--remote-control" not in command and ("remote", command) not in _warned:
+        _warned.add(("remote", command))
+        warn(f"{pane.name}: command has no --remote-control, so the pane will not be "
+             f"reachable from Claude's remote sessions: {command}")
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return
+    # Skip leading VAR=value assignments.
+    program = next((t for t in tokens if not re.fullmatch(r"[A-Za-z_]\w*=.*", t)), None)
+    if program and ("which", program) not in _warned and not shutil.which(program):
+        _warned.add(("which", program))
+        warn(f"{pane.name}: '{program}' not found in PATH; the pane will show 'command not "
+             "found' (the pane's login shell may have a different PATH)")
 
 
 def materialize_queen(cfg):
     """Write the packaged queen instructions into the queen dir when missing or different."""
     qdir = Path(cfg["queen"]["dir"])
-    (qdir / ".claude" / "hooks").mkdir(parents=True, exist_ok=True)
-    pkg = resources.files("hive").joinpath("queen")
-    files = {
-        qdir / "CLAUDE.md": QUEEN_HEADER.encode() + pkg.joinpath("CLAUDE.md").read_bytes(),
-        qdir / ".claude" / "settings.json": pkg.joinpath("settings.json").read_bytes(),
-        qdir / ".claude" / "hooks" / "guard.py": pkg.joinpath("hooks", "guard.py").read_bytes(),
-    }
-    for path, data in files.items():
-        if not path.exists() or path.read_bytes() != data:
-            path.write_bytes(data)
+    try:
+        (qdir / ".claude" / "hooks").mkdir(parents=True, exist_ok=True)
+        pkg = resources.files("hive").joinpath("queen")
+        files = {
+            qdir / "CLAUDE.md": QUEEN_HEADER.encode() + pkg.joinpath("CLAUDE.md").read_bytes(),
+            qdir / ".claude" / "settings.json": pkg.joinpath("settings.json").read_bytes(),
+            qdir / ".claude" / "hooks" / "guard.py":
+                pkg.joinpath("hooks", "guard.py").read_bytes(),
+        }
+        for path, data in files.items():
+            if not path.exists() or path.read_bytes() != data:
+                path.write_bytes(data)
+    except OSError as e:
+        die(f"cannot write the queen dir {qdir}: {e.strerror or e}", 1)
 
 
 def reconcile(cfg, dry_run=False, announce_idle=True):
@@ -449,17 +621,20 @@ def reconcile(cfg, dry_run=False, announce_idle=True):
         acted = True
 
     windows = None
+    skipped = set()
     for pane in to_start:
         acted = True
         if pane.name != queen_name and not Path(pane.dir).is_dir():
             # One stale entry must not keep the rest of the hive down.
             print(f"{'would skip' if dry_run else 'skipped'} {pane.name}: "
                   f"dir {pane.dir} does not exist", file=sys.stderr)
+            skipped.add(pane.type)
             continue
         warn_untrusted(cfg, pane)
         if dry_run:
             print(f"would start {pane.name}")
             continue
+        preflight(cfg, pane)
         if pane.name == queen_name:
             materialize_queen(cfg)
         if windows is None:
@@ -476,6 +651,9 @@ def reconcile(cfg, dry_run=False, announce_idle=True):
             tmux(cfg, "kill-pane", "-t", r.pane_id)
         print(f"{'would stop' if dry_run else 'stopped'} {r.name}")
 
+    if skipped:
+        warn(f"{len(skipped)} agent(s) {'would be ' if dry_run else ''}skipped: "
+             "dir missing; see 'hive list'")
     if not acted and announce_idle:
         print("no changes")
     return 0
@@ -488,6 +666,7 @@ def cmd_up(cfg, args):
     session = cfg["session"]
     first = desired_panes(cfg)[0]  # the queen
     warn_untrusted(cfg, first)
+    preflight(cfg, first)
     try:
         materialize_queen(cfg)
         shell = [cfg["pane_shell"]] if cfg["pane_shell"] else []
@@ -501,8 +680,10 @@ def cmd_up(cfg, args):
         print(f"started session {session} (tmux -L {cfg['socket']})")
         print(f"started {first.name}  [{first.dir}]  {expand_pane(cfg, first)}")
         reconcile(cfg, announce_idle=False)
-    except SystemExit:
+    except BaseException:
+        # Do not leave a half-built session behind (the queen's tmux call may be what failed).
         tmux(cfg, "kill-session", "-t", "=" + session, check=False)
+        print(f"hive: startup failed; removed session {session}", file=sys.stderr)
         raise
     return 0
 
@@ -539,12 +720,13 @@ def cmd_status(cfg, args):
     if not session_running(cfg):
         print("not running")
         return 1
-    fmt = "#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_title}\t#{pane_current_command}"
+    # pane_title last: it is the only field a program can put a tab in.
+    fmt = "#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_current_command}\t#{pane_title}"
     out = tmux(cfg, "list-panes", "-s", "-t", "=" + cfg["session"], "-F", fmt)
     print(f"session {cfg['session']}")
     current_window = None
     for line in out.stdout.splitlines():
-        _, window, pane_index, title, running = line.split("\t")
+        _, window, pane_index, running, title = line.split("\t", 4)
         if window != current_window:
             print(f"  {window}")
             current_window = window
@@ -600,14 +782,27 @@ def cmd_list(cfg, args):
 def edit_config(cfg, edit, mutate):
     """Apply a text edit to config.toml: verified against `mutate`, then written atomically."""
     path = cfg["config_path"]
-    with open(path, encoding="utf-8", newline="") as f:
-        old = f.read()
+    try:
+        with open(path, encoding="utf-8", newline="") as f:
+            old = f.read()
+    except (OSError, UnicodeDecodeError) as e:
+        die(f"cannot read {path}: {getattr(e, 'strerror', None) or e}", 1)
     try:
         new = edit(old)
         verify(old, new, mutate, path)
     except EditError as e:
         die(str(e), 2)
-    write_atomic(path, new)
+    try:
+        write_atomic(path, new)
+    except OSError as e:
+        die(f"cannot write {path}: {e.strerror or e}", 1)
+
+
+def check_config_writable(cfg):
+    """Fail before side effects (seeding trust) when the edit cannot be written."""
+    path = Path(cfg["config_path"])
+    if not (os.access(path, os.W_OK) and os.access(path.parent, os.W_OK)):
+        die(f"cannot write {path}: not writable (the file and its directory must be)", 1)
 
 
 def set_count_edit(cfg, kind, new_count):
@@ -644,7 +839,7 @@ def parse_env_args(items):
 
 
 def expand_config_dir(text, where):
-    directory = Path(text).expanduser()
+    directory = expanduser(text)
     if not directory.is_absolute():
         die(f"{where} '{text}' must be absolute or start with ~")
     return str(directory)
@@ -654,7 +849,11 @@ def sandbox_record(cfg, name):
     """The `[queen] discover` record with name == `name`."""
     if not cfg["discover"]:
         die("--sandbox needs [queen] discover, which is not configured")
-    out = subprocess.run(cfg["discover"], shell=True, capture_output=True, text=True)
+    try:
+        out = subprocess.run(cfg["discover"], shell=True, capture_output=True, text=True,
+                             timeout=DISCOVER_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        die(f"discover command timed out after {DISCOVER_TIMEOUT}s: {cfg['discover']}", 1)
     if out.returncode != 0:
         die(f"discover command failed (exit {out.returncode}): {out.stderr.strip()}", 1)
     try:
@@ -690,7 +889,7 @@ def cmd_spawn(cfg, args):
         if command is not None or config_dir is not None:
             die("--sandbox takes command and config_dir from discover; "
                 "do not combine it with --command or --config-dir")
-        record = sandbox_record(cfg, args.sandbox)
+        record = getattr(args, "sandbox_record", None) or sandbox_record(cfg, args.sandbox)
         command, config_dir = record["command"], record["config_dir"]
         if type_name is None:
             try:
@@ -719,15 +918,20 @@ def cmd_spawn(cfg, args):
         if not Path(entry["dir"]).is_dir():
             die(f"type '{entry['type']}' has dir '{entry['dir']}', which does not exist; "
                 "fix or remove the entry in config.toml")
+        check_config_writable(cfg)
         ensure_trust(entry["dir"], entry["config_dir"], args.trust)
         old, new = entry["count"], entry["count"] + args.n
         set_count_edit(cfg, entry["type"], new)
         return after_edit(cfg, entry["type"], old, new)
 
     # The type ends up unquoted in names and commands; keep it to safe characters.
-    if target.type == "queen" or not re.fullmatch(r"[A-Za-z0-9._-]+", target.type):
+    if target.type == "queen" or not TYPE_RE.fullmatch(target.type):
+        suggestion = re.sub(r"[^A-Za-z0-9._-]+", "-", target.type).strip("-") or "agent"
+        if suggestion == "queen":
+            suggestion = "queen-agent"
         die(f"'{target.type}' is not a usable agent type for '{target.dir}'; "
-            "give --type with letters, digits, '.', '_' or '-'")
+            "give --type with letters, digits, '.', '_' or '-', e.g. "
+            f"--type {suggestion}")
     new_agent = {"type": target.type, "dir": target.stored_dir, "count": args.n}
     if command is not None:
         new_agent["command"] = command
@@ -735,6 +939,7 @@ def cmd_spawn(cfg, args):
         new_agent["config_dir"] = config_dir
     if env:
         new_agent["env"] = env
+    check_config_writable(cfg)
     ensure_trust(target.dir, expanded_dir, args.trust)
     edit_config(cfg,
                 lambda text: append_agent(text, target.type, target.stored_dir, args.n,
@@ -744,9 +949,12 @@ def cmd_spawn(cfg, args):
 
 
 def cmd_stop(cfg, args):
+    if (args.target != "queen" and not any(a["type"] == args.target for a in cfg["agents"])
+            and "/" not in args.target and not args.target.startswith(("~", "."))):
+        die(f"no agent type '{args.target}'; 'hive list' shows the types")
     target = resolve_or_die(cfg, args.target)
     if not isinstance(target, Existing):
-        die(f"no agent type '{target.type}'; hive list shows the types")
+        die(f"no agent type '{target.type}'; 'hive list' shows the types")
     entry = target.entry
     if args.n > entry["count"]:
         die(f"type '{entry['type']}' has count {entry['count']}; cannot stop {args.n}")
@@ -768,7 +976,7 @@ def cmd_dirs(cfg, args):
 
 
 def same_dir(text, resolved):
-    return Path(text).expanduser().resolve() == resolved
+    return expanduser(text).resolve() == resolved
 
 
 def cmd_roots(cfg, args):
@@ -782,9 +990,8 @@ def cmd_roots(cfg, args):
         return 0
     if args.path is None:
         die(f"hive roots {args.action} needs a PATH")
-    with open(cfg["config_path"], "rb") as f:
-        raw = tomllib.load(f).get("search_roots", [])
-    resolved = Path(args.path).expanduser().resolve()
+    raw = read_config(Path(cfg["config_path"])).get("search_roots", [])
+    resolved = expanduser(args.path).resolve()
     if args.action == "remove":
         i = next((i for i, r in enumerate(raw) if same_dir(r, resolved)), None)
         if i is None:
@@ -794,7 +1001,7 @@ def cmd_roots(cfg, args):
                     lambda doc: doc["search_roots"].pop(i))
         print(f"removed {raw[i]}")
         return 0
-    given = Path(args.path).expanduser()
+    given = expanduser(args.path)
     if any(p.lower() in PRIVATE_NAMES for p in (*given.parts, *resolved.parts)):
         print(f"refused: {resolved} is under a secrets/private path", file=sys.stderr)
         return 3
@@ -822,17 +1029,25 @@ def cmd_init(args):
     path = config_path()
     if path.exists():
         print(f"{path} already exists")
-        return 0
-    example = resources.files("hive").joinpath("config.example.toml").read_text()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(example)
-    print(f"wrote {path}; it has no agents yet, so 'hive up' starts only the queen; "
-          "add agents with 'hive spawn DIR' or by editing it")
+    else:
+        example = resources.files("hive").joinpath("config.example.toml").read_text()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(example)
+        except OSError as e:
+            die(f"cannot write {path}: {e.strerror or e}", 1)
+        print(f"wrote {path}; it has no agents yet, so 'hive up' starts only the queen; "
+              "add agents with 'hive spawn DIR' or by editing it")
+    cfg, _ = lenient_config()
+    print(f"config={path} session={cfg['session']} socket={cfg['socket']}; "
+          "set tmux_socket in the config to keep a test or isolated config off your "
+          "real hive's tmux server")
     return 0
 
 
 def unit_path():
-    return config_home() / "systemd" / "user" / UNIT_NAME
+    # Where the systemd user manager looks, whatever XDG_CONFIG_HOME says here.
+    return Path.home() / ".config" / "systemd" / "user" / UNIT_NAME
 
 
 def systemctl(*args, check=True):
@@ -844,34 +1059,66 @@ def systemctl(*args, check=True):
     return result
 
 
+def unit_quote(text, command=True):
+    """Escape for an ExecStart (command) or Environment value: %, $, and quote when needed."""
+    text = text.replace("%", "%%")
+    if command:
+        text = text.replace("$", "$$")
+    if re.search(r'[\s"\'\\]', text):
+        return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return text
+
+
 def service_exe():
     """The hive executable for the unit: %h/.local/bin/hive unless installed elsewhere."""
     found = shutil.which("hive")
     default = Path.home() / ".local" / "bin" / "hive"
     if found is None or Path(found).absolute() == default:
         return "%h/.local/bin/hive"
-    return str(Path(found).absolute())
+    return unit_quote(str(Path(found).absolute()))
+
+
+def service_extra_env():
+    """Pass a non-default XDG_CONFIG_HOME through, so the service reads the same config."""
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    if not xdg or Path(xdg) == Path.home() / ".config":
+        return ""
+    return "Environment=" + unit_quote(f"XDG_CONFIG_HOME={xdg}", command=False) + "\n"
 
 
 def cmd_install_service(args):
+    if not shutil.which("systemctl"):
+        die("systemctl not found", 1)
     cfg = load_config()
     after = " ".join(["network-online.target", *cfg["after"]])
     path = unit_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(UNIT_TEMPLATE.format(after=after, exe=service_exe()))
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(UNIT_TEMPLATE.format(after=after, exe=service_exe(),
+                                             extra_env=service_extra_env()))
+    except OSError as e:
+        die(f"cannot write {path}: {e.strerror or e}", 1)
     print(f"wrote {path}")
     systemctl("daemon-reload")
     if args.enable:
         systemctl("enable", "--now", UNIT_NAME)
+    else:
+        print(f"next: systemctl --user enable --now {UNIT_NAME}\n"
+              "to start at boot without logging in: loginctl enable-linger $USER")
     return 0
 
 
 def cmd_uninstall_service(args):
-    systemctl("disable", "--now", UNIT_NAME, check=False)
     path = unit_path()
-    if path.exists():
+    if not path.exists():
+        print(f"not installed: {path} does not exist")
+        return 0
+    systemctl("disable", "--now", UNIT_NAME, check=False)
+    try:
         path.unlink()
-        print(f"removed {path}")
+    except OSError as e:
+        die(f"cannot remove {path}: {e.strerror or e}", 1)
+    print(f"removed {path}")
     systemctl("daemon-reload")
     return 0
 
@@ -902,23 +1149,53 @@ def depth_int(text):
     return value
 
 
+EPILOG = """\
+exit codes:
+  0  ok
+  1  runtime error, or the session is not running
+  2  usage or config error
+  3  untrusted or refused (spawn without --trust, dirs/roots refusals)
+"""
+
+
+BROKEN_CONFIG_NOTE = (
+    "Works with a broken config.toml: prefix, session and tmux_socket are read from its "
+    "parsable top-level lines, and only names the config does not set fall back to the "
+    "defaults. A name that is set but invalid or unparsable exits 2 instead of guessing.")
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
-        prog="hive", description="Run N instances of each agent kind in tmux panes.")
+        prog="hive", description="Run N instances of each agent kind in tmux panes.",
+        epilog=EPILOG, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--version", action="version", version=f"hive {get_version()}")
     sub = parser.add_subparsers(dest="command")
-    sub.add_parser("up", help="start the session, or reconcile it with the config if running")
-    sub.add_parser("down", help="stop the session (and the hive tmux server if empty)")
-    sub.add_parser("restart", help="restart via systemd if installed, else down + up")
-    sub.add_parser("status", help="show windows and panes (exit 1 if not running)")
+    sub.add_parser("up", help="start the session, or reconcile it with the config if running",
+                   description="Start the session with the queen and every configured agent, "
+                   "or reconcile it with the config if it is already running. Agents whose "
+                   "dir is missing are skipped with a warning.")
+    sub.add_parser("down", help="stop the session (and the hive tmux server if empty)",
+                   description="Stop the session, and the hive tmux server once it is empty. "
+                   + BROKEN_CONFIG_NOTE)
+    sub.add_parser("restart", help="restart via systemd if the unit is active, else down + up",
+                   description="Restart via systemd if the hive.service unit is active, "
+                   "else run down and then up.")
+    sub.add_parser("status", help="show windows and panes (exit 1 if not running)",
+                   description="Show windows and panes; exit 1 if the session is not running. "
+                   + BROKEN_CONFIG_NOTE)
     sub.add_parser("attach", help="attach to the session")
     sub.add_parser("list", help="show config and running state, unmanaged panes, drift")
-    p = sub.add_parser("spawn", help="add workers (edits config, then reconciles)")
+    p = sub.add_parser("spawn", help="add workers (edits config, then reconciles)",
+                       description="Add workers: raise the count of an existing agent type, or "
+                       "add a new type for a directory. Exit 3 if the directory is untrusted "
+                       "(rerun with --trust after the user confirms).")
     p.add_argument("target", metavar="TARGET",
                    help="agent type, or a directory (absolute, ~/..., or a name under search_roots)")
     p.add_argument("-n", type=positive_int, default=1, help="number of workers to add (default 1)")
-    p.add_argument("--type", help="agent type name for a new entry (default: directory name)")
-    p.add_argument("--command", dest="agent_command", help="command template; must contain {name} and --remote-control")
+    p.add_argument("--type", help="agent type name for a new entry (default: directory name; "
+                   "letters, digits, '.', '_' and '-' only)")
+    p.add_argument("--command", dest="agent_command", metavar="CMD",
+                   help="command template; must contain {name} and --remote-control")
     p.add_argument("--config-dir", dest="config_dir", metavar="PATH",
                    help="Claude config dir the command uses; only locates the trust file")
     p.add_argument("--sandbox", metavar="NAME",
@@ -930,7 +1207,9 @@ def build_parser():
     p = sub.add_parser("stop", help="remove workers (lowers count, then reconciles)")
     p.add_argument("target", metavar="TARGET", help="agent type")
     p.add_argument("-n", type=positive_int, default=1, help="number of workers to remove (default 1)")
-    p = sub.add_parser("reconcile", help="make the running session match the config")
+    p = sub.add_parser("reconcile", help="make the running session match the config",
+                       description="Start missing panes, stop surplus ones and adopt panes "
+                       "titled with a desired name, so the running session matches the config.")
     p.add_argument("--dry-run", action="store_true", help="only print what would change")
     sub.add_parser("discover", help="run [queen] discover and print its output")
     p = sub.add_parser("dirs", help="read-only: list directories under search_roots")
@@ -939,8 +1218,10 @@ def build_parser():
     p.add_argument("--depth", type=depth_int, default=1, metavar="N",
                    help=f"levels to list (default 1, max {MAX_DEPTH})")
     p = sub.add_parser("roots", help="show search_roots, or add/remove one (edits config)")
-    p.add_argument("action", nargs="?", choices=["add", "remove"])
-    p.add_argument("path", nargs="?", metavar="PATH")
+    p.add_argument("action", nargs="?", choices=["add", "remove"],
+                   help="add or remove a search root; omit to list them")
+    p.add_argument("path", nargs="?", metavar="PATH",
+                   help="the directory to add or remove (required with an action)")
     p = sub.add_parser("inspect-launcher",
                        help="read-only: show a launcher's CLAUDE_CONFIG_DIR evidence (files under inspect_roots only)")
     p.add_argument("launch_command", metavar="COMMAND", help="the full launch command, as one argument")
@@ -951,7 +1232,10 @@ def build_parser():
     return parser
 
 
-def main():
+LOCKED = ("up", "down", "spawn", "stop", "reconcile", "roots")
+
+
+def run():
     parser = build_parser()
     args = parser.parse_args()
     if args.command is None:
@@ -963,15 +1247,44 @@ def main():
         return cmd_install_service(args)
     if args.command == "uninstall-service":
         return cmd_uninstall_service(args)
-    if args.command in ("up", "down", "spawn", "stop", "reconcile", "roots"):
-        hold_lock()
-    cfg = load_config()
+    if args.command in ("down", "status"):
+        # These must work with a broken config.toml: systemd's ExecStop runs `down`.
+        cfg, problem = lenient_config()
+        if problem:
+            warn(f"config problem: {problem}")
+    else:
+        cfg = load_config()
+    if args.command in LOCKED:
+        if (args.command == "spawn" and args.sandbox is not None
+                and args.agent_command is None and args.config_dir is None):
+            # discover may be slow: run it before taking the lock.
+            args.sandbox_record = sandbox_record(cfg, args.sandbox)
+        hold_lock(required=args.command != "down")
+        if args.command != "down":
+            cfg = load_config()  # fresh copy: another command may have edited it meanwhile
     handlers = {"up": cmd_up, "down": cmd_down, "restart": cmd_restart,
                 "status": cmd_status, "attach": cmd_attach, "list": cmd_list,
                 "spawn": cmd_spawn, "stop": cmd_stop, "reconcile": cmd_reconcile,
                 "discover": cmd_discover, "inspect-launcher": cmd_inspect_launcher,
                 "dirs": cmd_dirs, "roots": cmd_roots}
     return handlers[args.command](cfg, args)
+
+
+def main():
+    try:
+        return run()
+    except KeyboardInterrupt:
+        print("hive: interrupted", file=sys.stderr)
+        return 130
+    except BrokenPipeError:
+        # The reader went away (| head); keep the interpreter's exit flush quiet.
+        try:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        except OSError:
+            pass
+        return 1
+    except (ConfigError, PathError) as e:
+        die(str(e))
 
 
 if __name__ == "__main__":

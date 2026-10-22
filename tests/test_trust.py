@@ -124,3 +124,19 @@ def test_seed_refuses_non_utf8(home):
     (home / ".claude.json").write_bytes(b"\xff\xfe{")
     with pytest.raises(TrustError, match="not valid JSON"):
         seed_trust(home / "p")
+
+
+def test_unknown_user_in_config_dir_and_root():
+    from hive.paths import PathError
+    with pytest.raises(PathError, match="unknown user"):
+        trust_file("~nosuchuser_hive/x")
+    with pytest.raises(PathError, match="unknown user"):
+        trust_root("~nosuchuser_hive/x")
+
+
+def test_lock_rmdir_missing_does_not_mask_result(home):
+    from hive.trust import _claude_lock
+    path = home / ".claude.json"
+    with _claude_lock(path):
+        os.rmdir(f"{path}.lock")      # vanished (e.g. judged stale by another process)
+    assert not os.path.exists(f"{path}.lock")

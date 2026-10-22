@@ -25,7 +25,7 @@ shell = "/bin/sh"
 command = "sleep 600"
 
 [queen]
-command = "sleep 600"
+command = "sleep 600 #"
 discover = "{discover}"
 
 [[agents]]
@@ -94,7 +94,8 @@ def test_lifecycle(hive, tmp_path):
     assert r.returncode == 0, r.stderr
     assert h.names() == {"t-queen", "t-a-1", "t-a-2"}
     # untrusted panes are started anyway, with a warning; nothing is seeded
-    assert f"untrusted t-a-1 {tmp_path / 'a'}" in r.stderr
+    assert f"hive: warning: untrusted t-a-1 {tmp_path / 'a'}" in r.stderr
+    assert "--trust" in r.stderr
     assert f"untrusted t-queen {tmp_path / 'hive' / 'queen'}" in r.stderr
     assert not (tmp_path / ".claude.json").exists()
     assert h.windows() == {"t-queen", "t-a"}
@@ -287,6 +288,7 @@ def test_missing_dir_is_skipped_and_claude_env_is_dropped(hive, tmp_path):
     r = h.run("up")
     assert r.returncode == 0, r.stderr
     assert f"skipped t-gone-1: dir {gone} does not exist" in r.stderr
+    assert "hive: warning: 1 agent(s) skipped: dir missing; see 'hive list'" in r.stderr
     assert h.names() == {"t-queen", "t-a-1", "t-a-2"}
     assert h.tmux("show-environment", "-g", "CLAUDECODE").returncode != 0
     r = h.run("reconcile", "--dry-run")

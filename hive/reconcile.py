@@ -7,6 +7,8 @@ import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from hive.paths import PathError, expanduser
+
 
 @dataclass(frozen=True)
 class Pane:
@@ -77,7 +79,7 @@ QUEEN_ERROR = "the queen is always running; use 'hive down' to stop the whole hi
 
 
 def _canonical(entry):
-    return str(Path(entry["dir"]).expanduser().resolve())
+    return str(expanduser(entry["dir"]).resolve())
 
 
 def _entry(cfg, type_name):
@@ -86,7 +88,10 @@ def _entry(cfg, type_name):
 
 def _path_dir(text):
     """Rule 4: a path must be absolute (or ~) and an existing directory."""
-    path = Path(text).expanduser()
+    try:
+        path = expanduser(text)
+    except PathError as e:
+        raise ResolveError(str(e)) from None
     if not path.is_absolute():
         raise ResolveError(f"'{text}' is relative; give an absolute path or ~/...")
     if not path.is_dir():

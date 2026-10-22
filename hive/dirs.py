@@ -9,6 +9,7 @@ import os
 import shlex
 from pathlib import Path
 
+from hive.paths import PathError, expanduser
 from hive.reconcile import ResolveError, _canonical, _target_dir
 
 MAX_DEPTH = 3
@@ -24,7 +25,7 @@ def _roots(cfg):
     """(as written, resolved) per search root; the written form is what gets printed."""
     out = []
     for r in cfg["search_roots"]:
-        p = Path(os.path.normpath(Path(r).expanduser().absolute()))
+        p = Path(os.path.normpath(expanduser(r).absolute()))
         out.append((p, p.resolve()))
     return out
 
@@ -51,7 +52,9 @@ def _lister(cfg, roots, out):
         nonlocal count
         try:
             entries = sorted(os.scandir(directory), key=lambda e: e.name)
-        except OSError:
+        except OSError as e:
+            print(f"dir={shlex.quote(str(directory))} "
+                  f"error={shlex.quote(e.strerror or str(e))}", file=out)
             return
         for entry in entries:
             if entry.name.startswith(".") or entry.name.lower() in PRIVATE_NAMES:
@@ -95,7 +98,11 @@ def list_dirs(cfg, target, depth, out, err):
         blocks = [p for p, _ in roots]
     else:
         if "/" in target or target.startswith(("~", ".")):
-            path = Path(target).expanduser().resolve()
+            try:
+                path = expanduser(target).resolve()
+            except PathError as e:
+                print(f"hive: error: {e}", file=err)
+                return 2
         else:
             try:
                 path = Path(_target_dir(cfg, target)[0])
@@ -118,7 +125,7 @@ def list_dirs(cfg, target, depth, out, err):
         for block in blocks:
             if not block.is_dir():
                 reason = "missing" if not block.exists() else "not a directory"
-                print(f"root={shlex.quote(str(block))} error={reason}", file=out)
+                print(f"root={shlex.quote(str(block))} error={shlex.quote(reason)}", file=out)
                 continue
             try:
                 os.scandir(block).close()

@@ -11,8 +11,10 @@ import shutil
 import subprocess
 import tempfile
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
+
+from hive.paths import expanduser
 
 LOCK_TIMEOUT = 5.0   # seconds to wait for Claude Code's lock on the trust file
 LOCK_STALE = 10.0    # Claude Code (proper-lockfile) treats older lock dirs as stale
@@ -25,13 +27,13 @@ class TrustError(Exception):
 def trust_file(config_dir=None):
     config_dir = config_dir or os.environ.get("CLAUDE_CONFIG_DIR")
     if config_dir:
-        return Path(config_dir).expanduser() / ".claude.json"
+        return expanduser(config_dir) / ".claude.json"
     return Path.home() / ".claude.json"
 
 
 def trust_root(directory):
     """The git toplevel containing `directory`, else the directory; absolute."""
-    d = Path(directory).expanduser().resolve()
+    d = expanduser(directory).resolve()
     try:
         out = subprocess.run(["git", "-C", str(d), "rev-parse", "--show-toplevel"],
                              capture_output=True, text=True)
@@ -82,7 +84,8 @@ def _claude_lock(path):
     try:
         yield
     finally:
-        os.rmdir(lock)
+        with suppress(FileNotFoundError):
+            os.rmdir(lock)
 
 
 def seed_trust(root, config_dir=None):

@@ -136,7 +136,10 @@ def verify(old_text, new_text, mutate, path="config"):
     except tomllib.TOMLDecodeError:
         ok = False
     if not ok:
-        raise EditError(f"config edit produced an unexpected result; {path} left unchanged")
+        raise EditError(f"config edit produced an unexpected result; {path} left unchanged. "
+                        "hive's line editor cannot safely rewrite this config (for example a "
+                        "`count =` line or text inside a multi-line string); "
+                        "edit config.toml by hand")
 
 
 def write_atomic(path, text):

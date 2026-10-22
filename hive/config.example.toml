@@ -3,7 +3,9 @@
 
 # prefix = "myhost"              # default: hostname
 # session = "myhost-agents"      # default: "<prefix>-agents"
-# tmux_socket = "hive"           # tmux -L name; default "hive"
+# tmux_socket = "hive"           # tmux -L name; default "hive"; use another for test/isolated configs
+# prefix and session: no ".", ":" or whitespace.
+# Paths (search_roots, agent dir, ...): absolute or start with ~.
 # login_shell = true             # default true: panes run "<shell> -l" so the login profile applies
 # shell = "/bin/bash"            # default: login shell from passwd, else $SHELL, else /bin/sh
 # search_roots = ["~/work", "~/notes"]   # where `hive spawn NAME` looks for a directory NAME; `hive dirs` lists them, `hive roots add PATH` adds one
@@ -14,6 +16,8 @@
 command = "claude -n {name} --remote-control {name} --permission-mode auto"
 
 # [queen]                        # optional; the queen always starts, in <config dir>/queen
+# The queen's command always gets `--tools Bash,Monitor,Read,Grep,Glob,Edit,Write,NotebookEdit --strict-mcp-config`
+# appended (unless it already has --tools / --strict-mcp-config), so it has no WebFetch, Agent or MCP tools.
 # command = "claude -n {name} --remote-control {name} --permission-mode auto"   # default: [defaults] command
 # discover = "claude-supervisor list"   # `hive discover` runs this and prints its output; `hive spawn --sandbox NAME` reads it:
 #   one record per line, key=value tokens, spaces double-quoted; required keys name, config_dir, command, e.g.
@@ -31,7 +35,8 @@ command = "claude -n {name} --remote-control {name} --permission-mode auto"
 # `hive up` starts only the queen. Add them with `hive spawn DIR` (or ask the queen),
 # or uncomment and edit the entry below; `dir` must exist.
 # Workspace trust: hive never seeds Claude Code's folder trust silently. `hive spawn` exits 3 for an untrusted
-# directory until you rerun it with --trust; `hive up` / `hive reconcile` warn `untrusted <name> <root>` on stderr.
+# directory until you rerun it with --trust; `hive up` / `hive reconcile` warn `hive: warning: untrusted <name> <root>; attach and accept Claude's trust prompt, or run 'hive spawn --trust' after the user confirms` on stderr.
+# A command without --remote-control, or whose program is not on PATH, only gets a warning when its pane starts.
 
 # [[agents]]
 # type = "project"                 # required, unique; window "<prefix>-<type>"

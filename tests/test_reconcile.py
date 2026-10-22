@@ -239,3 +239,9 @@ def test_sandbox_type(tmp_path):
     assert sandbox_type(cfg, str(tmp_path / "notes"), "x") == "notes-x"
     with pytest.raises(ResolveError, match="the queen is always running"):
         sandbox_type(cfg, "queen", "x")
+
+
+def test_unknown_user_in_target_is_resolve_error():
+    cfg = make_cfg([])
+    with pytest.raises(ResolveError, match="unknown user"):
+        resolve_target(cfg, "~nosuchuser_hive/x")

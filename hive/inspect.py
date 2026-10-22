@@ -10,6 +10,8 @@ import shlex
 import shutil
 from pathlib import Path
 
+from hive.paths import PathError, expanduser
+
 DEFAULT_ROOTS = ["~/.local/bin", "/usr/local/bin", "/usr/bin", "/bin", "/opt"]
 HEAD_BYTES = 4096
 MAX_BYTES = 1 << 20
@@ -36,7 +38,7 @@ def root_paths(roots):
     """Each root as written (~ expanded) and resolved, so a symlinked root still matches."""
     out = []
     for r in roots:
-        p = Path(os.path.normpath(Path(r).expanduser()))
+        p = Path(os.path.normpath(expanduser(r)))
         out += [p, p.resolve()]
     return out
 
@@ -53,7 +55,11 @@ def inspect_launcher(command, roots, out, err, environ=os.environ):
         return 2
     token = tokens[0]
     if "/" in token:
-        found = Path(token).expanduser()
+        try:
+            found = expanduser(token)
+        except PathError as e:
+            print(f"not found: {e}", file=err)
+            return 2
     else:
         which = shutil.which(token, path=environ.get("PATH"))
         found = Path(which) if which else None
@@ -76,10 +82,14 @@ def inspect_launcher(command, roots, out, err, environ=os.environ):
         return 2
 
     record = f"path={shlex.quote(str(path))} resolved={shlex.quote(str(resolved))}"
-    with open(resolved, "rb") as f:
-        head = f.read(HEAD_BYTES)
-        binary = b"\0" in head or not head.startswith(b"#!")
-        data = b"" if binary else head + f.read(MAX_BYTES + 1 - HEAD_BYTES)
+    try:
+        with open(resolved, "rb") as f:
+            head = f.read(HEAD_BYTES)
+            binary = b"\0" in head or not head.startswith(b"#!")
+            data = b"" if binary else head + f.read(MAX_BYTES + 1 - HEAD_BYTES)
+    except OSError as e:
+        print(f"not found: {token} (unreadable: {e.strerror or e})", file=err)
+        return 2
     if binary:
         print(f"{record} kind=binary", file=out)
     else:

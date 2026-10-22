@@ -107,3 +107,20 @@ def test_inspect_roots_config(tmp_path, monkeypatch):
     path.write_text('inspect_roots = ["bin"]\n[defaults]\ncommand = "c"\n')
     with pytest.raises(SystemExit):
         cli.load_config()
+
+
+def test_unreadable_script_is_reported(bindir):
+    if os.geteuid() == 0:
+        pytest.skip("root can read mode-000 files")
+    p = script(bindir / "wrap", "exec claude\n")
+    p.chmod(0)
+    try:
+        code, out, err = run(str(p), [bindir])
+    finally:
+        p.chmod(0o755)
+    assert code == 2 and out == "" and "unreadable" in err
+
+
+def test_unknown_user_command_not_found(bindir):
+    code, out, err = run("~nosuchuser_hive/x", [bindir])
+    assert code == 2 and "unknown user" in err

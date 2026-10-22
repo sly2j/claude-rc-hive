@@ -1,3 +1,4 @@
+import os
 import sys
 
 import pytest
@@ -210,3 +211,29 @@ def test_roots_edit_keeps_bracket_comment_and_skips_multiline_key(tree, monkeypa
     path = write_config(tree, text)
     assert run(monkeypatch, capsys, "roots", "add", str(tree / "notes"))[0] == 0
     assert path.read_text() == text.replace('prefix = "t"\n', f'prefix = "t"\nsearch_roots = ["{tree}/notes"]\n')
+
+
+def test_unlistable_subdir_reports_error(tree, monkeypatch, capsys):
+    if os.geteuid() == 0:
+        pytest.skip("root can list mode-000 dirs")
+    roots_config(tree)
+    bad = tree / "work" / "web"
+    bad.chmod(0)
+    try:
+        code, lines, _ = run(monkeypatch, capsys, "dirs", "--depth", "2")
+    finally:
+        bad.chmod(0o755)
+    assert code == 0
+    assert any(l.startswith(f"dir={bad} error=") for l in lines)
+
+
+def test_unknown_user_target_and_root(tree, monkeypatch, capsys):
+    roots_config(tree)
+    code, _, err = run(monkeypatch, capsys, "dirs", "~nosuchuser_hive/x")
+    assert code == 2 and "unknown user" in err
+
+
+def test_unknown_user_in_search_root_raises_patherror():
+    from hive.paths import PathError
+    with pytest.raises(PathError, match="unknown user"):
+        dirs._roots({"search_roots": ["~nosuchuser_hive/r"]})

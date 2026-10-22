@@ -272,3 +272,11 @@ def test_append_agent_config_dir():
     verify(EXAMPLE, new, append_mutation(type="s", dir="/s", count=1,
                                          command="c {name} --remote-control",
                                          config_dir="~/.cc"))
+
+
+def test_verify_refusal_explains_limit():
+    with pytest.raises(EditError) as e:
+        verify('a = 1\n', 'a = 2\n', lambda d: None, path="/x/config.toml")
+    msg = str(e.value)
+    assert "left unchanged" in msg and "multi-line string" in msg
+    assert "edit config.toml by hand" in msg
