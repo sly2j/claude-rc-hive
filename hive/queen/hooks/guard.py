@@ -5,8 +5,9 @@ Only the QUEEN_TOOLS are allowed; any other tool (WebFetch, Agent, mcp__*, ...) 
 and Monitor: only a single `hive ...` command, no chaining, redirection or substitution, and no
 argument under a secrets/private path. Of those, `hive spawn --command X` (also `--command=X`
 and argparse abbreviations such as `--comm`) runs without a prompt only when X is a command
-string from ../config.toml ([defaults] command or an [[agents]] command). For any other
---command, for any spawn `--env` or `--trust` (same abbreviations), for `hive roots add PATH`,
+string from ../config.toml ([defaults] command or an [[agents]] command). Likewise each
+`--arg X` (same forms) must be an args string from [defaults], [queen] or an [[agents]] entry. For any other
+--command or --arg, for any spawn `--env` or `--trust` (same abbreviations), for `hive roots add PATH`,
 for `hive launchers add` and for `hive down`/`restart`, the guard answers "ask" so the user confirms (`hive stop` needs no
 prompt). Read, Grep, Glob, Edit, Write, NotebookEdit: only paths inside the queen dir
 ($CLAUDE_PROJECT_DIR), never under a secrets/private path, no `..` in glob patterns, and no
@@ -61,6 +62,19 @@ def config_commands(qdir):
         return set()
 
 
+def config_args(qdir):
+    """Arg strings in ../config.toml ([defaults], [queen] and [[agents]] args); empty on error."""
+    try:
+        import tomllib
+        with open(qdir.parent / "config.toml", "rb") as f:
+            cfg = tomllib.load(f)
+        lists = [(cfg.get("defaults") or {}).get("args"), (cfg.get("queen") or {}).get("args")]
+        lists += [a.get("args") for a in cfg.get("agents") or [] if isinstance(a, dict)]
+        return {x for lst in lists if isinstance(lst, list) for x in lst if isinstance(x, str)}
+    except Exception:
+        return set()
+
+
 def spawn_options(args, option):
     """Values of `option` (e.g. --command, or an abbreviation of it) in `hive spawn` arguments."""
     values = []
@@ -85,7 +99,8 @@ def has_flag(args, flag):
     return False
 
 
-SPAWN_VALUE_OPTIONS = ("--type", "--command", "--config-dir", "--launcher", "--sandbox", "--env")
+SPAWN_VALUE_OPTIONS = ("--type", "--command", "--config-dir", "--launcher", "--sandbox", "--env",
+                       "--arg")
 
 
 def spawn_target(args):
@@ -149,6 +164,9 @@ def check_bash(command, qdir):
         known = config_commands(qdir)
         reasons = [f"hive spawn --command is not a command from config.toml: {cmd}"
                    for cmd in spawn_options(tokens[2:], "--command") if cmd not in known]
+        known_args = config_args(qdir)
+        reasons += [f"hive spawn --arg is not an arg from config.toml: {a}"
+                    for a in spawn_options(tokens[2:], "--arg") if a not in known_args]
         env = spawn_options(tokens[2:], "--env")
         if env:
             reasons.append(f"hive spawn --env sets environment for the new agent: {' '.join(env)}")

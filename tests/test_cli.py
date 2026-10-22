@@ -394,7 +394,7 @@ def test_unit_exe_is_escaped_for_systemd(monkeypatch):
 # --- U1, R15: warnings when panes start ---------------------------------------
 
 def pane(command):
-    return SimpleNamespace(name="t-a-1", type="a", index=1, dir="/tmp", command=command)
+    return SimpleNamespace(name="t-a-1", type="a", index=1, dir="/tmp", command=command, args=())
 
 
 def test_preflight_warns_about_missing_program_and_remote_control(env, monkeypatch, capsys):

@@ -73,11 +73,14 @@ def set_count(text, type_, n):
     raise EditError(f"no [[agents]] block with type '{type_}'")
 
 
-def append_agent(text, type_, dir_, count, command=None, env=None, config_dir=None):
+def append_agent(text, type_, dir_, count, command=None, env=None, config_dir=None,
+                 args=None):
     check_inline(text.splitlines(keepends=True))
     block = f"[[agents]]\ntype = {toml_string(type_)}\ndir = {toml_string(dir_)}\ncount = {count}\n"
     if command is not None:
         block += f"command = {toml_string(command)}\n"
+    if args is not None:
+        block += f"args = [{', '.join(toml_string(a) for a in args)}]\n"
     if config_dir is not None:
         block += f"config_dir = {toml_string(config_dir)}\n"
     if env:

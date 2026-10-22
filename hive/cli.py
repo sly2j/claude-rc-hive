@@ -38,8 +38,8 @@ TOP_KEYS = {"prefix", "session", "tmux_socket", "login_shell", "shell",
             "inspect_roots", "launchers"}
 LAUNCHER_KEYS = {"name", "command", "config_dir", "description"}
 LAUNCHER_NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]*")
-AGENT_KEYS = {"type", "dir", "count", "command", "env", "config_dir"}
-QUEEN_KEYS = {"command", "discover", "env", "config_dir"}
+AGENT_KEYS = {"type", "dir", "count", "command", "args", "env", "config_dir"}
+QUEEN_KEYS = {"command", "args", "discover", "env", "config_dir"}
 # Used when neither [queen] nor [defaults] sets a command.
 DEFAULT_QUEEN_COMMAND = "claude -n {name} --remote-control {name} --permission-mode auto"
 # Tool allowlist for the queen; the guard hook enforces the same set.
@@ -195,6 +195,13 @@ def check_env(env, where, path):
             raise ConfigError(f"{path}: {where}.CLAUDE_CONFIG_DIR: {CONFIG_DIR_ENV_MSG}")
 
 
+def check_args(value, key, path):
+    """Optional launcher flags: a list of non-empty strings."""
+    if not isinstance(value, list) or not all(isinstance(a, str) and a for a in value):
+        raise ConfigError(f"{path}: '{key}' must be an array of non-empty strings")
+    return value
+
+
 def check_config_dir(table, where, path):
     """Optional config_dir: ~ expanded, absolute. Only locates the trust file."""
     value = table.get("config_dir")
@@ -305,10 +312,11 @@ def parse_config():
 
     defaults = raw.get("defaults", {})
     check_type(defaults, dict, "defaults", path)
-    check_keys(defaults, {"command", "launcher"}, "[defaults]", path)
+    check_keys(defaults, {"command", "launcher", "args"}, "[defaults]", path)
     default_command = defaults.get("command")
     if default_command is not None:
         check_text(default_command, "defaults.command", path)
+    default_args = check_args(defaults.get("args", []), "defaults.args", path)
     # Not checked against [[launchers]]: it may name a discover record, resolved at use time.
     default_launcher = defaults.get("launcher")
     if default_launcher is not None:
@@ -364,6 +372,7 @@ def parse_config():
     check_keys(queen, QUEEN_KEYS, "[queen]", path)
     queen_command = queen.get("command", default_command or DEFAULT_QUEEN_COMMAND)
     check_text(queen_command, "queen.command", path)
+    queen_args = check_args(queen.get("args", default_args), "queen.args", path)
     discover = queen.get("discover")
     if discover is not None:
         check_text(discover, "queen.discover", path)
@@ -410,11 +419,14 @@ def parse_config():
                               "'command'")
         check_text(command, f"{where}.command", path)
 
+        agent_args = check_args(entry.get("args", default_args), f"{where}.args", path)
+
         agent_env = entry.get("env", {})
         check_env(agent_env, f"{where}.env", path)
 
         agents.append({"type": kind, "dir": directory, "count": count, "command": command,
-                       "env": agent_env, "config_dir": check_config_dir(entry, where, path)})
+                       "args": agent_args, "env": agent_env,
+                       "config_dir": check_config_dir(entry, where, path)})
 
     return {
         "prefix": prefix,
@@ -428,7 +440,8 @@ def parse_config():
         "search_roots": search_roots,
         "inspect_roots": inspect_roots,
         "queen": {"type": "queen", "dir": str(config_home() / "hive" / "queen"),
-                  "command": queen_command_line(queen_command), "env": queen_env, "config_dir": queen_config_dir},
+                  "command": queen_command_line(queen_command, queen_args), "args": queen_args,
+                  "env": queen_env, "config_dir": queen_config_dir},
         "discover": discover,
         "launchers": launchers,
         "default_launcher": default_launcher,
@@ -436,11 +449,16 @@ def parse_config():
     }
 
 
-def queen_command_line(command):
-    """The queen runs with a tool allowlist and no MCP servers, whatever command it got."""
-    if not re.search(r"(^|\s)--tools(\s|=|$)", command):
+def queen_command_line(command, args=()):
+    """The queen runs with a tool allowlist and no MCP servers, whatever command it got.
+
+    Its args are placed into the command as whole shell-quoted words, so only an arg that is
+    exactly the flag counts, not one whose text merely mentions it."""
+    if not (re.search(r"(^|\s)--tools(\s|=|$)", command)
+            or any(a == "--tools" or a.startswith("--tools=") for a in args)):
         command += f" --tools {QUEEN_TOOLS}"
-    if not re.search(r"(^|\s)--strict-mcp-config(\s|$)", command):
+    if not (re.search(r"(^|\s)--strict-mcp-config(\s|$)", command)
+            or "--strict-mcp-config" in args):
         command += " --strict-mcp-config"
     return command
 
@@ -458,6 +476,15 @@ def expand(command, **values):
     for key, value in values.items():
         command = command.replace("{" + key + "}", str(value))
     return command
+
+
+def expand_command(command, args, **values):
+    """Expand the command, then place the quoted, expanded args: at every {args}, else appended."""
+    quoted = " ".join(shlex.quote(expand(a, **values)) for a in args)
+    command = expand(command, **values)
+    if "{args}" in command:
+        return command.replace("{args}", quoted)
+    return f"{command} {quoted}" if quoted else command
 
 
 # --- tmux -----------------------------------------------------------------
@@ -570,8 +597,8 @@ def window_ids(cfg):
 
 
 def expand_pane(cfg, pane):
-    return expand(pane.command, name=pane.name, type=pane.type, index=pane.index,
-                  dir=pane.dir, prefix=cfg["prefix"])
+    return expand_command(pane.command, pane.args, name=pane.name, type=pane.type,
+                          index=pane.index, dir=pane.dir, prefix=cfg["prefix"])
 
 
 def setup_pane(cfg, pane, pane_id):
@@ -827,7 +854,8 @@ def cmd_list(cfg, args):
     for agent in cfg["agents"]:
         n = sum(1 for r in running.values() if r.type == agent["type"])
         print(f"agent type={agent['type']} dir={agent['dir']} count={agent['count']} "
-              f"running={n} command={quote(agent['command'])} {trust_fields(cfg, agent)}"
+              f"running={n} command={quote(agent['command'])} "
+              f"args={json.dumps(agent['args'])} {trust_fields(cfg, agent)}"
               + ("" if Path(agent["dir"]).is_dir() else " dir_missing=yes"))
     for r in running.values():
         screen = tmux(cfg, "capture-pane", "-p", "-t", r.pane_id, check=False).stdout
@@ -992,12 +1020,26 @@ def ensure_trust(directory, config_dir, seed):
     print(f"trusted {root} in {path}")
 
 
+def record_args(record, agent_args):
+    """Explicit --arg values, else a discover record's optional shell-quoted `args`, else None."""
+    if agent_args is not None or "args" not in record:
+        return agent_args
+    try:
+        split = shlex.split(record["args"])
+    except ValueError as e:
+        die(f"launcher '{record['name']}': args: {e}: {record['args']}", 2)
+    if not all(split):
+        die(f"launcher '{record['name']}': args: empty argument: {record['args']}", 2)
+    return split
+
+
 def expand_dir_or_none(config_dir):
     return expand_config_dir(config_dir, "config_dir") if config_dir is not None else None
 
 
 def cmd_spawn(cfg, args):
     command, config_dir, type_name = args.agent_command, args.config_dir, args.type
+    agent_args = args.agent_args
     record = None
     if args.launcher is not None:
         if command is not None or config_dir is not None:
@@ -1005,6 +1047,7 @@ def cmd_spawn(cfg, args):
                 "do not combine it with --command or --config-dir")
         record = getattr(args, "launcher_record", None) or launcher_record(cfg, args.launcher)
         command, config_dir = record["command"], record["config_dir"]
+        agent_args = record_args(record, agent_args)
         if type_name is None:
             try:
                 type_name = sandbox_type(cfg, args.target, args.launcher)
@@ -1015,6 +1058,8 @@ def cmd_spawn(cfg, args):
         check_launcher_command(command, "--command")
     expanded_dir = expand_dir_or_none(config_dir)
     env = parse_env_args(args.env)
+    if args.agent_args is not None and not all(args.agent_args):
+        die("--arg must not be empty")
     target = resolve_or_die(cfg, args.target, type_name)
     if (isinstance(target, New) and record is None and command is None and config_dir is None
             and cfg["default_launcher"]):
@@ -1022,6 +1067,7 @@ def cmd_spawn(cfg, args):
         record = launcher_record(cfg, cfg["default_launcher"])
         command, config_dir = record["command"], record["config_dir"]
         check_launcher_command(command, f"launcher '{record['name']}' command")
+        agent_args = record_args(record, agent_args)
         expanded_dir = expand_dir_or_none(config_dir)
         if type_name is None:
             try:
@@ -1036,6 +1082,10 @@ def cmd_spawn(cfg, args):
             die(f"type '{entry['type']}' runs '{entry['command']}'; to run a different command "
                 f"in the same directory give a new type: hive spawn {entry['dir']} "
                 "--type <name> --command '...'")
+        if agent_args is not None and agent_args != entry["args"]:
+            die(f"type '{entry['type']}' runs args {json.dumps(entry['args'])}; to run different "
+                f"args in the same directory give a new type: hive spawn {entry['dir']} "
+                "--type <name> --arg ...", 2)
         if config_dir is not None and expanded_dir != entry["config_dir"]:
             die(f"type '{entry['type']}' has config_dir '{entry['config_dir'] or ''}'; to use "
                 f"another one in the same directory give a new type: hive spawn {entry['dir']} "
@@ -1063,6 +1113,8 @@ def cmd_spawn(cfg, args):
     new_agent = {"type": target.type, "dir": target.stored_dir, "count": args.n}
     if command is not None:
         new_agent["command"] = command
+    if agent_args is not None:
+        new_agent["args"] = agent_args
     if config_dir is not None:
         new_agent["config_dir"] = config_dir
     if env:
@@ -1071,7 +1123,7 @@ def cmd_spawn(cfg, args):
     ensure_trust(target.dir, expanded_dir, args.trust)
     edit_config(cfg,
                 lambda text: append_agent(text, target.type, target.stored_dir, args.n,
-                                          command, env, config_dir),
+                                          command, env, config_dir, agent_args),
                 lambda doc: doc.setdefault("agents", []).append(new_agent))
     return after_edit(cfg, target.type, 0, args.n)
 
@@ -1404,6 +1456,9 @@ def build_parser():
                    "-<launcher> when a launcher is chosen; letters, digits, '.', '_' and '-' only)")
     p.add_argument("--command", dest="agent_command", metavar="CMD",
                    help="command template; must contain {name} and --remote-control")
+    p.add_argument("--arg", dest="agent_args", action="append", metavar="ARG",
+                   help="flag added to the command of a new type (repeatable); "
+                        "use --arg=--fable for values starting with '-'")
     p.add_argument("--config-dir", dest="config_dir", metavar="PATH",
                    help="Claude config dir the command uses; only locates the trust file")
     p.add_argument("--launcher", "--sandbox", dest="launcher", metavar="NAME",

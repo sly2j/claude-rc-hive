@@ -297,3 +297,41 @@ def test_version_and_help_allowed(qdir):
 def test_restart_asks(qdir):
     assert asked(qdir, "hive restart") == (
         "hive restart stops and restarts the whole hive, including this queen; approve to run it")
+
+
+ARG_CONFIG = ('[defaults]\nargs = ["--fable", "--dflt"]\n\n[queen]\nargs = ["--qarg"]\n\n'
+              '[[agents]]\nname = "a"\nargs = ["--agentarg", 3]\n')
+
+
+@pytest.mark.parametrize("command", [
+    "hive spawn x --arg=--dflt",
+    "hive spawn x --arg --dflt",
+    "hive spawn x --arg=--agentarg",
+    "hive spawn x --arg=--qarg --arg=--fable",
+])
+def test_spawn_listed_arg_allowed(qdir, command):
+    write_config(qdir, ARG_CONFIG)
+    assert asked(qdir, command) is None
+
+
+@pytest.mark.parametrize("flag", ["--arg ", "--arg=", "--ar ", "--a="])
+def test_spawn_unlisted_arg_asks(qdir, flag):
+    write_config(qdir, ARG_CONFIG)
+    reason = asked(qdir, f"hive spawn x {flag}--evil")
+    assert "--evil" in reason and "not an arg from config.toml" in reason
+
+
+def test_spawn_arg_without_config_asks(qdir):
+    assert "--fable" in asked(qdir, "hive spawn x --arg=--fable")
+
+
+def test_spawn_listed_command_unlisted_arg_one_reason(qdir):
+    write_config(qdir, ARG_CONFIG + f'\n[[agents]]\nname = "b"\ncommand = "{CMD}"\n')
+    reason = asked(qdir, f'hive spawn x --command "{CMD}" --arg=--evil')
+    assert "--evil" in reason and "not a command" not in reason and ";" in reason
+    assert reason.count("hive spawn --") == 1
+
+
+def test_spawn_arg_value_skipped_for_trust_target(qdir):
+    write_config(qdir, ARG_CONFIG)
+    assert "trust to DIR" in asked(qdir, "hive spawn --arg x DIR --trust")

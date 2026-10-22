@@ -12,17 +12,22 @@
 # inspect_roots = ["~/.local/bin", "/usr/local/bin", "/usr/bin", "/bin", "/opt"]   # the default; the only dirs `hive inspect-launcher` reads from
 
 [defaults]
-# Placeholders: {name} = "<type>-<machine>-<index>" (machine = prefix), {type}, {index}, {dir}, {prefix}
+# Placeholders: {name} = "<type>-<machine>-<index>" (machine = prefix), {type}, {index}, {dir}, {prefix}, {args}
 command = "claude -n {name} --remote-control {name} --permission-mode auto"
 # launcher = "claude"            # default launcher for new types; a [[launchers]] name or a discover name
+# args = ["--fable"]            # extra launcher flags: list of non-empty strings, each shell-quoted (placeholders expanded first).
+#   Placed at {args} in the command, else appended at the end. A per-type or [queen] args replaces this list, no merge.
+#   A launcher that takes flags before "--" needs {args}: command = "claude-supervisor run api {args} -- -n {name} --remote-control {name}"
 
 # [queen]                        # optional; the queen always starts, in <config dir>/queen
 # The queen's command always gets `--tools Bash,Monitor,Read,Grep,Glob,Edit,Write,NotebookEdit,AskUserQuestion --strict-mcp-config`
-# appended (unless it already has --tools / --strict-mcp-config), so it has no WebFetch, Agent or MCP tools.
+# appended (unless its command or args already have --tools / --strict-mcp-config), so it has no WebFetch, Agent or MCP tools.
 # command = "claude -n {name} --remote-control {name} --permission-mode auto"   # default: [defaults] command
+# args = ["--fable"]             # default: [defaults] args
 # discover = "claude-supervisor list"   # `hive discover` runs this and prints its output; `hive spawn --sandbox NAME` reads it:
 #   one record per line, key=value tokens, spaces double-quoted; required keys name, config_dir, command, e.g.
-#   name=api config_dir=~/.claude-api command="claude-supervisor run api -- -n {name} --remote-control {name}"
+#   name=api config_dir=~/.claude-api command="claude-supervisor run api {args} -- -n {name} --remote-control {name}"
+#   optional key args="--fable" (shell-quoted string, split like a shell would)
 # config_dir = "~/.claude-queen" # Claude config dir of the queen's command; only used to find the trust file, never exported
 # env = { FOO = "bar" }          # per-type env, exported after [env]; not set on the tmux server
 
@@ -52,4 +57,5 @@ command = "claude -n {name} --remote-control {name} --permission-mode auto"
 # count = 1                        # panes; default 1; 0 keeps the entry without panes
 # command = "claude -n {name} --remote-control {name}"   # optional per-type override of defaults.command
 # config_dir = "~/.claude-sandbox"   # optional: Claude config dir of this type's command; only used to find the trust file <config_dir>/.claude.json, never exported
+# args = ["--fable"]                 # optional per-type args; replaces defaults.args (also: hive spawn --arg=--fable)
 # env = { FOO = "bar" }              # optional per-type env (also: hive spawn --env KEY=VALUE); CLAUDE_CONFIG_DIR is rejected, use config_dir

@@ -44,7 +44,7 @@ def test_1_5_config_loads_with_queen_defaults(write, tmp_path):
     cfg = cli.load_config()
     assert cfg["queen"] == {"type": "queen", "dir": str(tmp_path / "hive" / "queen"),
                             "command": "claude -n {name} --remote-control {name}" + QUEEN_FLAGS,
-                            "env": {},
+                            "args": [], "env": {},
                             "config_dir": None}
     assert cfg["queen"]["command"] == cfg["agents"][0]["command"] + QUEEN_FLAGS
     assert cfg["search_roots"] == []

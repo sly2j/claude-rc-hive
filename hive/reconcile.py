@@ -20,6 +20,7 @@ class Pane:
     command: str  # unexpanded template
     env: dict = field(default_factory=dict)  # the type's own env, exported after [env]
     config_dir: str | None = None  # Claude config dir of the command; locates the trust file
+    args: tuple = ()  # extra flags for the command, placed by cli.expand_command
 
 
 @dataclass(frozen=True)
@@ -43,13 +44,14 @@ def desired_panes(cfg):
     queen = cfg["queen"]
     name = queen_name(prefix)
     panes = [Pane(name, name, "queen", 1, queen["dir"], queen["command"],
-                  queen.get("env", {}), queen.get("config_dir"))]
+                  queen.get("env", {}), queen.get("config_dir"),
+                  tuple(queen.get("args", ())))]
     for agent in cfg["agents"]:
         window = f"{agent['type']}-{prefix}"
         for i in range(1, agent["count"] + 1):
             panes.append(Pane(f"{window}-{i}", window, agent["type"], i,
                               agent["dir"], agent["command"], agent.get("env", {}),
-                              agent.get("config_dir")))
+                              agent.get("config_dir"), tuple(agent.get("args", ()))))
     return panes
 
 
