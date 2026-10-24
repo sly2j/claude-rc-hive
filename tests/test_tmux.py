@@ -283,6 +283,7 @@ def test_missing_dir_is_skipped_and_claude_env_is_dropped(hive, tmp_path):
         f.write(f'\n[[agents]]\ntype = "gone"\ndir = "{gone}"\n')
     # as if `hive up` ran from inside a Claude Code session
     h.env["CLAUDECODE"] = "1"
+    h.env["CLAUDE_CONFIG_DIR"] = str(tmp_path / "session-config")
     r = h.run("reconcile", "--dry-run")
     assert r.returncode == 1  # not running yet
     r = h.run("up")
@@ -291,6 +292,7 @@ def test_missing_dir_is_skipped_and_claude_env_is_dropped(hive, tmp_path):
     assert "hive: warning: 1 agent(s) skipped: dir missing; see 'hive list'" in r.stderr
     assert h.names() == {"hive-queen-t", "a-t-1", "a-t-2"}
     assert h.tmux("show-environment", "-g", "CLAUDECODE").returncode != 0
+    assert h.tmux("show-environment", "-g", "CLAUDE_CONFIG_DIR").returncode != 0
     r = h.run("reconcile", "--dry-run")
     assert f"would skip gone-t-1: dir {gone} does not exist" in r.stderr
     out = h.run("list").stdout.splitlines()

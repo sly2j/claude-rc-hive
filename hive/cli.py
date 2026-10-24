@@ -491,8 +491,10 @@ def expand_command(command, args, **values):
 
 # Set by Claude Code for its child processes. A tmux server started from inside a
 # Claude session would hand them to every pane, and claude in a pane would then
-# think it is nested in that session.
-CLAUDE_SESSION_ENV = {"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID",
+# think it is nested in that session. CLAUDE_CONFIG_DIR too: the launched command picks
+# the config dir; an inherited one would load that session's settings (e.g. its "agent").
+CLAUDE_SESSION_ENV = {"CLAUDE_CONFIG_DIR", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT",
+                      "CLAUDE_CODE_SESSION_ID",
                       "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_BRIDGE_SESSION_ID",
                       "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN",
                       "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_EXECPATH",
