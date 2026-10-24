@@ -335,3 +335,19 @@ def test_spawn_listed_command_unlisted_arg_one_reason(qdir):
 def test_spawn_arg_value_skipped_for_trust_target(qdir):
     write_config(qdir, ARG_CONFIG)
     assert "trust to DIR" in asked(qdir, "hive spawn --arg x DIR --trust")
+
+
+@pytest.mark.parametrize("platform, path, private", [
+    ("darwin", "/private/var/folders/x/proj", False),
+    ("darwin", "/private/tmp/x/private/y", True),
+    ("darwin", "/Users/u/private/x", True),
+    ("darwin", "/private/tmp/secrets.toml", True),
+    ("linux", "/private/var/folders/x/proj", True),
+])
+def test_is_private_leading_private_only_on_darwin(monkeypatch, platform, path, private):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("guard_mod", GUARD)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    monkeypatch.setattr(sys, "platform", platform)
+    assert mod.is_private(path) is private

@@ -4,6 +4,7 @@ Runs main() with HOME and XDG_CONFIG_HOME under tmp_path. tmux is never the real
 tests either stub cli.tmux or put a fake `tmux` first on PATH.
 """
 
+import json
 import os
 import stat
 import sys
@@ -347,7 +348,35 @@ def test_status_survives_a_tab_in_the_pane_title(env, monkeypatch, capsys):
 
 # --- R11, U9: the service unit -----------------------------------------------
 
+def test_service_commands_refuse_on_macos(env, monkeypatch, capsys):
+    log = fake_bin(env.tmp, monkeypatch, "systemctl")
+    monkeypatch.setattr(sys, "platform", "darwin")
+    for cmd in ("install-service", "uninstall-service"):
+        code, _, err = hive(monkeypatch, capsys, cmd)
+        assert code == 1 and f"{cmd} is Linux-only (systemd)" in err
+        assert "Run at login on macOS" in err
+    assert not (env.home / ".config" / "systemd").exists()
+    assert not (env.xdg / "systemd").exists()
+    assert not log.exists()
+
+
+def test_materialized_guard_hook_uses_hives_interpreter(env):
+    cfg = {"queen": {"dir": str(env.tmp / "queen")}}
+    cli.materialize_queen(cfg)
+    path = env.tmp / "queen" / ".claude" / "settings.json"
+    got = json.loads(path.read_text())
+    want = json.loads(cli.resources.files("hive").joinpath("queen", "settings.json").read_text())
+    hook = got["hooks"]["PreToolUse"][0]["hooks"][0]
+    assert hook["command"] == sys.executable
+    hook["command"] = "python3"
+    assert got == want
+    before = path.stat().st_mtime_ns
+    cli.materialize_queen(cfg)  # unchanged bytes are not rewritten
+    assert path.stat().st_mtime_ns == before
+
+
 def test_install_service_without_systemctl_writes_nothing(env, monkeypatch, capsys):
+    monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setenv("PATH", str(env.tmp / "empty"))
     code, _, err = hive(monkeypatch, capsys, "install-service")
     assert code == 1 and "systemctl not found" in err
@@ -356,6 +385,7 @@ def test_install_service_without_systemctl_writes_nothing(env, monkeypatch, caps
 
 
 def test_install_service_path_env_and_next_steps(env, monkeypatch, capsys):
+    monkeypatch.setattr(sys, "platform", "linux")
     log = fake_bin(env.tmp, monkeypatch, "systemctl")
     code, out, _ = hive(monkeypatch, capsys, "install-service")
     unit = env.home / ".config" / "systemd" / "user" / "hive.service"
@@ -374,6 +404,7 @@ def test_install_service_path_env_and_next_steps(env, monkeypatch, capsys):
 
 def test_install_service_default_xdg_adds_no_environment_and_enable_skips_hint(
         env, monkeypatch, capsys):
+    monkeypatch.setattr(sys, "platform", "linux")
     fake_bin(env.tmp, monkeypatch, "systemctl")
     monkeypatch.setenv("XDG_CONFIG_HOME", str(env.home / ".config"))
     cfg = env.home / ".config" / "hive" / "config.toml"

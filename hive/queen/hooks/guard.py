@@ -123,7 +123,10 @@ def spawn_target(args):
 
 
 def is_private(path):
-    parts = [p.lower() for p in Path(path).parts]
+    parts = Path(path).parts
+    if sys.platform == "darwin" and parts[:2] == ("/", "private"):
+        parts = parts[:1] + parts[2:]  # /tmp, /var live under /private on macOS
+    parts = [p.lower() for p in parts]
     name = parts[-1] if parts else ""
     return (any(p in PRIVATE_PARTS for p in parts)
             or name == "secrets" or name.startswith("secrets."))

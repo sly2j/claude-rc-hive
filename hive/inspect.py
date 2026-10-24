@@ -10,7 +10,7 @@ import shlex
 import shutil
 from pathlib import Path
 
-from hive.paths import PathError, expanduser
+from hive.paths import PathError, expanduser, secret_check_parts
 
 DEFAULT_ROOTS = ["~/.local/bin", "/usr/local/bin", "/usr/bin", "/bin", "/opt"]
 HEAD_BYTES = 4096
@@ -24,7 +24,7 @@ PRIVATE_PARTS = {"secrets", "private"}
 
 def is_private(path):
     """True for a path under a secrets/private dir, or a file named secrets or secrets.*."""
-    parts = [p.lower() for p in Path(path).parts]
+    parts = [p.lower() for p in secret_check_parts(path)]
     name = parts[-1] if parts else ""
     return (any(p in PRIVATE_PARTS for p in parts)
             or name == "secrets" or name.startswith("secrets."))

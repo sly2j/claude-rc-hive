@@ -184,6 +184,43 @@ def test_roots_add_rejects_non_dir_and_secrets(tree, monkeypatch, capsys):
     assert path.read_text() == ROOTS_TEXT
 
 
+def test_roots_add_private_prefix_is_only_dropped_on_darwin(tree, monkeypatch, capsys):
+    write_config(tree, ROOTS_TEXT)
+    under_private = (tree / "work").resolve().parts[:2] == ("/", "private")
+    monkeypatch.setattr(sys, "platform", "darwin")
+    deep = tree / "notes" / "private" / "x"
+    deep.mkdir(parents=True)
+    assert run(monkeypatch, capsys, "roots", "add", str(deep))[0] == 3
+    if under_private:  # macOS tmp dirs live under /private/var
+        code, out, _ = run(monkeypatch, capsys, "roots", "add", str(tree / "notes"))
+        assert (code, out) == (0, [f"added {(tree / 'notes').resolve()}"])
+    monkeypatch.setattr(sys, "platform", "linux")
+    code, _, err = run(monkeypatch, capsys, "roots", "add", str(deep))
+    assert code == 3 and err.startswith("refused: ")
+
+
+def test_roots_darwin_matches_case_variant_by_file_identity(tree, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    work = (tree / "work").resolve()
+    swapped = work.parent / "WORK"
+    insensitive = swapped.exists()
+    assert cli.same_dir(str(swapped), work) == insensitive
+    assert cli.same_dir(str(tree / "notes"), work) is False
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert cli.same_dir(str(swapped), work) is False
+
+
+def test_dirs_case_variant_target_on_darwin(tree, monkeypatch, capsys):
+    if not (tree / "WORK").exists():
+        pytest.skip("case-sensitive filesystem")
+    monkeypatch.setattr(sys, "platform", "darwin")
+    roots_config(tree)
+    code, out, err = run(monkeypatch, capsys, "dirs", str(tree / "WORK" / "api"))
+    assert (code, err) == (0, "") and out
+    code, _, err = run(monkeypatch, capsys, "dirs", str(tree / "WORK" / "Private"))
+    assert code == 3 and "secrets/private" in err
+
+
 def test_roots_remove(tree, monkeypatch, capsys):
     monkeypatch.setenv("HOME", str(tree))
     path = write_config(tree, ROOTS_TEXT)

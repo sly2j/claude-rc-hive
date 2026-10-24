@@ -1,6 +1,6 @@
 # hive
 
-hive runs Claude Code Remote Control sessions in tmux: N instances of each agent type, on a dedicated tmux server, with one extra coordinator session called the queen. You describe the agents in one config file; `hive up` starts them, and each one is then reachable by name from the Claude app or claude.ai through Remote Control. Use it to keep a fixed set of remote-controllable Claude sessions running on a machine, start them at login with systemd, and add or remove instances by asking the queen.
+hive runs Claude Code Remote Control sessions in tmux: N instances of each agent type, on a dedicated tmux server, with one extra coordinator session called the queen. You describe the agents in one config file; `hive up` starts them, and each one is then reachable by name from the Claude app or claude.ai through Remote Control. Use it to keep a fixed set of remote-controllable Claude sessions running on a machine, start them at login (systemd on Linux, a LaunchAgent on macOS), and add or remove instances by asking the queen.
 
 The repository is `claude-rc-hive`; the program, Python package, config directory and systemd unit are all named `hive`.
 
@@ -13,7 +13,7 @@ Terms used throughout are defined in [Concepts](#concepts).
 - Starts the queen first: a Claude session that edits the config for you through `hive spawn` and `hive stop` ("one more X", "one less X").
 - Checks Claude Code workspace trust before adding a directory. hive never seeds trust silently: it writes the trust key only when you pass `--trust`.
 - Restricts the queen with Claude Code permission rules and a guard hook, so it can run single `hive` commands and touch files only in its own directory (see [Queen security model](#queen-security-model)).
-- Optionally installs a systemd user unit that starts the hive at login or boot.
+- On Linux, optionally installs a systemd user unit that starts the hive at login or boot. On macOS, a LaunchAgent recipe does the same (see [Run at login on macOS](#run-at-login-on-macos)).
 
 ## What it doesn't do
 
@@ -22,7 +22,7 @@ Terms used throughout are defined in [Concepts](#concepts).
 - It does not know what a command does. An agent type is a directory plus a command; hive types the command into a shell and leaves it there. A command that exits is not restarted (the shell stays).
 - It does not apply a changed `dir` or `command` to panes that are already running.
 - It does not route work to agents or watch their output. The queen adds and removes workers; it does not do their work.
-- It targets Linux with tmux. The service needs systemd user units.
+- It targets Linux and macOS with tmux. `hive install-service` needs systemd user units, so it is Linux-only.
 
 ## Concepts
 
@@ -44,13 +44,19 @@ Terms used throughout are defined in [Concepts](#concepts).
 
 ### Prerequisites
 
-- Linux, with git.
+- Linux or macOS, with git.
 - tmux >= 3.0.
-- Python >= 3.11, and uv (or pipx) to install hive.
-- Claude Code CLI (`claude`), logged in, with Remote Control. The queen's guard hook needs Claude Code >= 2.1.295 (for the hook's `onFailure` setting) and `python3` on `PATH`.
-- Optional: systemd (user units) to start the hive at login.
+- uv (or pipx) to install hive. `uv tool install` provides Python >= 3.11 itself; with pipx you need Python >= 3.11 already.
+- Claude Code CLI (`claude`), logged in, with Remote Control. The queen's guard hook needs Claude Code >= 2.1.295 (for the hook's `onFailure` setting). The hook runs with hive's own Python interpreter, so `python3` need not be on `PATH`.
+- Optional: systemd (user units) on Linux to start the hive at login. On macOS, use a LaunchAgent.
 
 ### Install
+
+On macOS, install the prerequisites with Homebrew first, and make sure `PATH` includes `~/.local/bin` (where uv puts `hive`) and `/opt/homebrew/bin` (tmux, uv):
+
+```sh
+brew install tmux uv
+```
 
 ```sh
 uv tool install git+https://github.com/sly2j/claude-rc-hive
@@ -58,7 +64,7 @@ uv tool install git+https://github.com/sly2j/claude-rc-hive
 # or with pipx:          pipx install git+https://github.com/sly2j/claude-rc-hive
 ```
 
-On distributions that follow PEP 668 (for example Debian 13), `pip install --user` is blocked; use uv or pipx.
+On distributions that follow PEP 668 (for example Debian 13) and on Homebrew Python, `pip install --user` is blocked; use uv or pipx.
 
 ### First hive
 
@@ -113,7 +119,7 @@ On distributions that follow PEP 668 (for example Debian 13), `pip install --use
    hive down
    ```
 
-To start the hive at login, run `hive install-service --enable` (see [systemd service](#systemd-service)).
+To start the hive at login, run `hive install-service --enable` on Linux (see [systemd service](#systemd-service)), or follow [Run at login on macOS](#run-at-login-on-macos).
 
 ## Configuration
 
@@ -189,8 +195,8 @@ Upgrading from the `<prefix>-<type>-<index>` naming: `hive up` and reconcile ado
 | `hive roots [add PATH \| remove PATH]` | Show `search_roots`, or add or remove one. See [hive roots](#hive-roots). |
 | `hive inspect-launcher COMMAND` | Read-only: show a launcher's `CLAUDE_CONFIG_DIR` evidence. See [hive inspect-launcher](#hive-inspect-launcher). |
 | `hive init` | Write the example config if none exists and print `wrote <path>; it has no agents yet, so 'hive up' starts only the queen; add agents with 'hive spawn DIR' or by editing it` (else print `<path> already exists`). Then print `config=<path> session=<session> socket=<socket>; set tmux_socket in the config to keep a test or isolated config off your real hive's tmux server`. The example defines no agents; the commented `[[agents]]` entry shows the keys. |
-| `hive install-service [--enable]` | Write `~/.config/systemd/user/hive.service` and reload; `--enable` also runs `enable --now`. Without `--enable` it prints the follow-up commands `systemctl --user enable --now hive.service` and `loginctl enable-linger $USER`. Needs `systemctl` (else `systemctl not found`, exit 1) and a valid config. See [systemd service](#systemd-service). |
-| `hive uninstall-service` | Disable, remove the unit, reload. Prints `not installed: <path> does not exist` and exits 0 if there is no unit. |
+| `hive install-service [--enable]` | Write `~/.config/systemd/user/hive.service` and reload; `--enable` also runs `enable --now`. Without `--enable` it prints the follow-up commands `systemctl --user enable --now hive.service` and `loginctl enable-linger $USER`. Linux only (see [Run at login on macOS](#run-at-login-on-macos)). Needs `systemctl` (else `systemctl not found`, exit 1) and a valid config. See [systemd service](#systemd-service). |
+| `hive uninstall-service` | Disable, remove the unit, reload. Prints `not installed: <path> does not exist` and exits 0 if there is no unit. Linux only, like `install-service`. |
 | `hive --version` | Print `hive <version>`. |
 
 ### hive list
@@ -283,7 +289,7 @@ The queen runs with `--permission-mode auto` by default, so its limits come from
 
 - The queen's tools are limited to Bash, Monitor, Read, Grep, Glob, Edit, Write, NotebookEdit and AskUserQuestion (for its launcher choice dialogue). hive appends `--tools Bash,Monitor,Read,Grep,Glob,Edit,Write,NotebookEdit,AskUserQuestion --strict-mcp-config` to the queen command unless the queen's command or its `args` already contain `--tools` or `--strict-mcp-config`, and the guard hook denies every other tool (WebFetch, WebSearch, Agent, MCP tools) with `guard: tool '<name>' is not available to the queen`.
 - `.claude/settings.json` allows `Bash(hive:*)` and denies the Read tool on `~/.ssh`, `~/.claude`, `~/.claude.json`, `~/.gnupg`, `~/.aws`, `.env` files and `secrets`/`private` paths.
-- A PreToolUse guard hook (`.claude/hooks/guard.py`, matcher `*`) checks every tool call. If the hook fails (it crashes, or `python3` is missing), the call is blocked; this needs Claude Code >= 2.1.295, and older versions let the call through.
+- A PreToolUse guard hook (`.claude/hooks/guard.py`, matcher `*`) checks every tool call. If the hook fails (it crashes), the call is blocked; this needs Claude Code >= 2.1.295, and older versions let the call through.
 - Shell tools (Bash, Monitor): only a single `hive` command is allowed, with no `;`, `&`, `|`, backticks, `$(`, redirects or newlines; path arguments may not use globs or brace expansion or point under a `secrets`/`private` path. No options before the subcommand (`hive -- down` is blocked); only `hive --version`, `-h` and `--help` are allowed there. Anything else is blocked.
 - These `hive` commands get a confirmation prompt that names what they do (when one call matches several, the reasons are combined into one prompt):
   - `hive spawn --command CMD`, unless CMD equals a command already in `config.toml` (`[defaults] command` or an `[[agents]] command`). It also prompts when `config.toml` cannot be read. `--command=CMD` and abbreviations such as `--comm` count too.
@@ -313,6 +319,8 @@ hive never seeds trust silently. `hive spawn` checks the trust root (in the chos
 `hive up` and `hive reconcile` (also `--dry-run`) warn `untrusted <name> <root>` for each pane they would start in an untrusted root, and still start it. The pane shows the dialog, which you accept via `hive attach`. `hive list` marks such a pane `waiting=trust`.
 
 ## systemd service
+
+Linux only. On macOS, `hive install-service` and `uninstall-service` exit 1 (systemd services are Linux-only); see [Run at login on macOS](#run-at-login-on-macos).
 
 `hive install-service --enable` writes `~/.config/systemd/user/hive.service`, reloads systemd and starts the unit; it then starts at login (at boot only with `loginctl enable-linger $USER`). Without `--enable` it writes and reloads only, and prints those two commands (`systemctl --user enable --now hive.service`, `loginctl enable-linger $USER`). It checks for `systemctl` first and exits 1 with `systemctl not found` if it is missing. The unit always goes to `~/.config/systemd/user`, where the systemd user manager looks. If `XDG_CONFIG_HOME` is set to something other than `~/.config` when you install, the unit gets an `Environment=XDG_CONFIG_HOME=...` line, so the service reads the same config as your shell.
 
@@ -344,6 +352,39 @@ WantedBy=default.target
 `KillMode=control-group` is the default, kept explicit. tmux built with systemd support (Debian's 3.5a is) moves each pane's processes into its own `tmux-spawn-*.scope` unit. `systemctl --user status hive` then lists only the tmux server, and the cgroup kill does not reach the agents; they end when `ExecStop` (`hive down`) kills the session and the panes get SIGHUP. `hive down` alone leaves the unit "active" (`RemainAfterExit`).
 
 Logs: `journalctl --user -u hive`, or `journalctl --user-unit hive` where journald keeps no per-user files (`Storage=volatile`).
+
+## Run at login on macOS
+
+There is no `hive install-service` on macOS. Write a LaunchAgent by hand, `~/Library/LaunchAgents/local.hive.plist`. Use the absolute path of `hive` (`command -v hive`) and write out your home directory: launchd does not expand `~`. No `KeepAlive`: `hive up` exits once the tmux session is started.
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>local.hive</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/YOU/.local/bin/hive</string>
+    <string>up</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/YOU/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/Users/YOU/Library/Logs/hive.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/YOU/Library/Logs/hive.log</string>
+</dict>
+</plist>
+```
+
+Load it with `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.hive.plist` (it also runs at each login), and unload it with `launchctl bootout gui/$(id -u)/local.hive`. Unloading does not stop the hive; run `hive down` for that. On macOS `hive restart` just runs `hive down` and `hive up`.
 
 ## Troubleshooting
 

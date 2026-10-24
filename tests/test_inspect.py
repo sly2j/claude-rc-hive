@@ -5,7 +5,7 @@ import pytest
 
 from hive import cli
 from hive.inspect import (LauncherNotFound, LauncherRefused, inspect_launcher,
-                          resolve_launcher)
+                          is_private, resolve_launcher)
 
 
 def run(command, roots, environ=None):
@@ -149,3 +149,15 @@ def test_resolve_launcher_symlink_outside_roots_accepted(tmp_path, bindir):
     target = script(tmp_path / "elsewhere" / "real", "exec true\n")
     (bindir / "claude").symlink_to(target)
     assert resolve_launcher("claude", {"PATH": str(bindir)}) == bindir / "claude"
+
+
+@pytest.mark.parametrize("platform, path, private", [
+    ("darwin", "/private/var/folders/x/proj", False),
+    ("darwin", "/private/tmp/x/private/y", True),
+    ("darwin", "/Users/u/private/x", True),
+    ("darwin", "/private/tmp/secrets.toml", True),
+    ("linux", "/private/var/folders/x/proj", True),
+])
+def test_is_private_leading_private_only_on_darwin(monkeypatch, platform, path, private):
+    monkeypatch.setattr("sys.platform", platform)
+    assert is_private(path) is private

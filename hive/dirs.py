@@ -7,6 +7,7 @@ resolve inside search_roots and are never followed for recursion.
 
 import os
 import shlex
+import sys
 from pathlib import Path
 
 from hive.paths import PathError, expanduser
@@ -31,10 +32,21 @@ def _roots(cfg):
 
 
 def _containing_root(path, roots):
-    """The resolved root that contains resolved `path`, or None."""
+    """The resolved root that contains resolved `path`, or None.
+
+    On macOS a case-variant spelling of a root matches by file identity (case-insensitive
+    APFS); the root is then returned in `path`'s spelling, so path.relative_to(root) works.
+    """
     for _, resolved in roots:
         if path == resolved or resolved in path.parents:
             return resolved
+        if sys.platform == "darwin" and str(path).lower().startswith(str(resolved).lower()):
+            for p in (path, *path.parents):
+                try:
+                    if os.path.samefile(p, resolved):
+                        return p
+                except OSError:
+                    pass
     return None
 
 

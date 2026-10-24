@@ -25,7 +25,7 @@ from hive.configedit import (ENV_KEY_RE, EditError, append_agent, append_launche
                              set_default_launcher, set_search_roots, verify, write_atomic)
 from hive.dirs import MAX_DEPTH, PRIVATE_NAMES, list_dirs
 from hive.inspect import DEFAULT_ROOTS, LauncherError, inspect_launcher, resolve_launcher
-from hive.paths import PathError, expanduser
+from hive.paths import PathError, expanduser, secret_check_parts
 from hive.reconcile import (RESERVED_TYPES, Existing, New, ResolveError, RunningPane, desired_panes,
                             parse_records, plan, queen_name, resolve_target, sandbox_type)
 from hive.trust import (TrustError, is_trusted, looks_like_trust_prompt, seed_trust,
@@ -666,6 +666,20 @@ def preflight(cfg, pane):
              "found' (the pane's login shell may have a different PATH)")
 
 
+def queen_settings(src):
+    """Packaged settings.json with the guard hook run by hive's own interpreter.
+
+    A bare python3 may be older than 3.11 (stock macOS) and lack tomllib, which would
+    silently disable the guard.
+    """
+    settings = json.loads(src.read_bytes())
+    for entry in settings.get("hooks", {}).get("PreToolUse", []):
+        for hook in entry.get("hooks", []):
+            if hook.get("command") == "python3":
+                hook["command"] = sys.executable or "python3"
+    return (json.dumps(settings, indent=2) + "\n").encode()
+
+
 def materialize_queen(cfg):
     """Write the packaged queen instructions into the queen dir when missing or different."""
     qdir = Path(cfg["queen"]["dir"])
@@ -674,7 +688,7 @@ def materialize_queen(cfg):
         pkg = resources.files("hive").joinpath("queen")
         files = {
             qdir / "CLAUDE.md": QUEEN_HEADER.encode() + pkg.joinpath("CLAUDE.md").read_bytes(),
-            qdir / ".claude" / "settings.json": pkg.joinpath("settings.json").read_bytes(),
+            qdir / ".claude" / "settings.json": queen_settings(pkg.joinpath("settings.json")),
             qdir / ".claude" / "hooks" / "guard.py":
                 pkg.joinpath("hooks", "guard.py").read_bytes(),
         }
@@ -1156,7 +1170,15 @@ def cmd_dirs(cfg, args):
 
 
 def same_dir(text, resolved):
-    return expanduser(text).resolve() == resolved
+    path = expanduser(text).resolve()
+    if path == resolved:
+        return True
+    if sys.platform == "darwin":  # case-insensitive APFS: compare by file identity
+        try:
+            return os.path.samefile(path, resolved)
+        except OSError:
+            pass
+    return False
 
 
 def cmd_roots(cfg, args):
@@ -1182,7 +1204,8 @@ def cmd_roots(cfg, args):
         print(f"removed {raw[i]}")
         return 0
     given = expanduser(args.path)
-    if any(p.lower() in PRIVATE_NAMES for p in (*given.parts, *resolved.parts)):
+    parts = (*secret_check_parts(given), *secret_check_parts(resolved))
+    if any(p.lower() in PRIVATE_NAMES for p in parts):
         print(f"refused: {resolved} is under a secrets/private path", file=sys.stderr)
         return 3
     if not resolved.is_dir():
@@ -1346,7 +1369,14 @@ def service_extra_env():
     return "Environment=" + unit_quote(f"XDG_CONFIG_HOME={xdg}", command=False) + "\n"
 
 
+def die_if_macos(command):
+    if sys.platform == "darwin":
+        die(f"{command} is Linux-only (systemd); on macOS run 'hive up' from a launchd "
+            "LaunchAgent, see the README section 'Run at login on macOS'", 1)
+
+
 def cmd_install_service(args):
+    die_if_macos("install-service")
     if not shutil.which("systemctl"):
         die("systemctl not found", 1)
     cfg = load_config()
@@ -1369,6 +1399,7 @@ def cmd_install_service(args):
 
 
 def cmd_uninstall_service(args):
+    die_if_macos("uninstall-service")
     path = unit_path()
     if not path.exists():
         print(f"not installed: {path} does not exist")
